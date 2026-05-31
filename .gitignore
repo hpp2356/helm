@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Testing
+coverage/
+.nyc_output/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Helm runtime artifacts
+.helm/runs/
+.helm/journal/
+.helm/traces/
+.helm/sessions/
+
+# Private operator kits
+helm-control-room-kit*/
+helm-one-folder-kit*/
+operator-kits/
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/settings.json
+
+# Debug logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
