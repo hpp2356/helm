@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { ScriptedProvider } from "./scripted-provider.js";
 import { AgentLoop } from "./agent-loop.js";
+import { ToolRuntime } from "./tool-runtime.js";
 import { JsonlJournal } from "@helm/core";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -17,7 +18,8 @@ describe("AgentLoop", () => {
       { role: "assistant", content: "Hello! How can I help?" },
     ]);
 
-    const loop = new AgentLoop(provider, new Map(), journal, { maxTurns: 5 });
+    const toolRuntime = new ToolRuntime();
+    const loop = new AgentLoop(provider, toolRuntime, journal, { maxTurns: 5 });
     await loop.run("test-run-1", "Hi!");
 
     await journal.close();
@@ -33,8 +35,8 @@ describe("AgentLoop", () => {
     const journal = new JsonlJournal(journalPath);
     await journal.open();
 
-    const tools = new Map();
-    tools.set("echo", {
+    const toolRuntime = new ToolRuntime();
+    toolRuntime.register({
       name: "echo",
       description: "echoes input",
       parameters: {
@@ -57,7 +59,7 @@ describe("AgentLoop", () => {
       { role: "assistant", content: "Done! The tool returned the echo." },
     ]);
 
-    const loop = new AgentLoop(provider, tools, journal, { maxTurns: 5 });
+    const loop = new AgentLoop(provider, toolRuntime, journal, { maxTurns: 5 });
     await loop.run("test-run-2", "echo hello");
 
     await journal.close();
@@ -83,7 +85,8 @@ describe("AgentLoop", () => {
       { role: "assistant", content: "Handled gracefully." },
     ]);
 
-    const loop = new AgentLoop(provider, new Map(), journal, { maxTurns: 5 });
+    const toolRuntime = new ToolRuntime();
+    const loop = new AgentLoop(provider, toolRuntime, journal, { maxTurns: 5 });
     await loop.run("test-run-3", "test");
 
     await journal.close();
@@ -104,7 +107,8 @@ describe("AgentLoop", () => {
     // Provider with no responses — will throw on first send()
     const provider = new ScriptedProvider([]);
 
-    const loop = new AgentLoop(provider, new Map(), journal, { maxTurns: 5 });
+    const toolRuntime = new ToolRuntime();
+    const loop = new AgentLoop(provider, toolRuntime, journal, { maxTurns: 5 });
     await loop.run("test-run-4", "test");
 
     await journal.close();
@@ -130,8 +134,8 @@ describe("AgentLoop", () => {
       toolCalls: [{ id: `tc${i}`, name: "echo", args: { text: `${i}` } }],
     }));
 
-    const tools = new Map();
-    tools.set("echo", {
+    const toolRuntime = new ToolRuntime();
+    toolRuntime.register({
       name: "echo",
       description: "echoes",
       parameters: {},
@@ -142,7 +146,7 @@ describe("AgentLoop", () => {
 
     const provider = new ScriptedProvider(responses);
 
-    const loop = new AgentLoop(provider, tools, journal, { maxTurns: 3 });
+    const loop = new AgentLoop(provider, toolRuntime, journal, { maxTurns: 3 });
     await loop.run("test-run-5", "test");
 
     await journal.close();
