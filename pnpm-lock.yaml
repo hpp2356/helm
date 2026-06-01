@@ -24,7 +24,11 @@ importers:
 
   packages/replay: {}
 
-  packages/runtime: {}
+  packages/runtime:
+    dependencies:
+      '@helm/core':
+        specifier: workspace:*
+        version: link:../core
 
 packages:
 
