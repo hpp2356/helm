@@ -1,0 +1,10 @@
+{
+  "name": "@helm/eval",
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "tsc --build"
+  }
+}
