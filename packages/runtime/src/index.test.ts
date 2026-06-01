@@ -1,8 +1,17 @@
-import { describe, it, expect } from 'vitest';
-import { PKG } from './index.js';
+import { describe, it, expect } from "vitest";
+import { ScriptedProvider, AgentLoop, type AgentLoopOptions } from "./index.js";
 
-describe('@helm/runtime', () => {
-  it('should export the package name', () => {
-    expect(PKG).toBe('@helm/runtime');
+describe("@helm/runtime", () => {
+  it("should export ScriptedProvider", () => {
+    expect(typeof ScriptedProvider).toBe("function");
+  });
+
+  it("should export AgentLoop", () => {
+    expect(typeof AgentLoop).toBe("function");
+  });
+
+  it("should re-export AgentLoopOptions as a type (compile-time check)", () => {
+    const opts: AgentLoopOptions = { maxTurns: 5 };
+    expect(opts.maxTurns).toBe(5);
   });
 });
