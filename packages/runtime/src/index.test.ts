@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { ScriptedProvider, AgentLoop, type AgentLoopOptions } from "./index.js";
+import { ScriptedProvider, AgentLoop, ToolRuntime, type AgentLoopOptions } from "./index.js";
 
 describe("@helm/runtime", () => {
   it("should export ScriptedProvider", () => {
@@ -8,6 +8,10 @@ describe("@helm/runtime", () => {
 
   it("should export AgentLoop", () => {
     expect(typeof AgentLoop).toBe("function");
+  });
+
+  it("should export ToolRuntime", () => {
+    expect(typeof ToolRuntime).toBe("function");
   });
 
   it("should re-export AgentLoopOptions as a type (compile-time check)", () => {

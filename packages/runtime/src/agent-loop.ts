@@ -1,4 +1,5 @@
-import { type Provider, type Tool, type JsonlJournal } from "@helm/core";
+import { type Provider, type JsonlJournal } from "@helm/core";
+import { type ToolRuntime } from "./tool-runtime.js";
 
 export interface AgentLoopOptions {
   maxTurns: number;
@@ -7,7 +8,7 @@ export interface AgentLoopOptions {
 export class AgentLoop {
   constructor(
     private provider: Provider,
-    private tools: Map<string, Tool>,
+    private toolRuntime: ToolRuntime,
     private journal: JsonlJournal,
     private options: AgentLoopOptions = { maxTurns: 10 }
   ) {}
@@ -68,19 +69,7 @@ export class AgentLoop {
             timestamp: Date.now(),
           });
 
-          const tool = this.tools.get(tc.name);
-          let output: string;
-          if (tool) {
-            try {
-              output = await tool.execute(tc.args);
-            } catch (err) {
-              output = `Error: ${
-                err instanceof Error ? err.message : String(err)
-              }`;
-            }
-          } else {
-            output = `Error: unknown tool "${tc.name}"`;
-          }
+          const output = await this.toolRuntime.execute(tc.name, tc.args);
 
           await this.journal.append({
             type: "tool:result",
