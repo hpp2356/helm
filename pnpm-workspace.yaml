@@ -3,3 +3,4 @@ packages:
   - 'packages/runtime'
   - 'packages/eval'
   - 'packages/replay'
+  - 'packages/cli'

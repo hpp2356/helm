@@ -1,0 +1,5 @@
+[
+  { "action": "allow", "pattern": "calculator", "riskLevel": "MEDIUM", "description": "arithmetic" },
+  { "action": "deny", "pattern": "calculator", "riskLevel": "CRITICAL", "description": "calculator blocked for demo" },
+  { "action": "allow", "pattern": "weather", "riskLevel": "LOW", "description": "weather" }
+]

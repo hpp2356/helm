@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": ".",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext"
+  },
+  "references": [
+    { "path": "../core" },
+    { "path": "../runtime" }
+  ],
+  "include": ["bin/**/*.ts"]
+}

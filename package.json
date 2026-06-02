@@ -4,7 +4,9 @@
   "scripts": {
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
-    "build": "pnpm -r build"
+    "build": "pnpm -r build",
+    "demo": "pnpm build && node packages/cli/dist/bin/run.js packages/cli/fixtures/tools.json packages/cli/fixtures/script.jsonl packages/cli/fixtures/perms.json",
+    "demo:deny": "pnpm build && node packages/cli/dist/bin/run.js packages/cli/fixtures/tools.json packages/cli/fixtures/script.jsonl packages/cli/fixtures/perms-deny-calc.json"
   },
   "devDependencies": {
     "@types/node": "^25.9.1",

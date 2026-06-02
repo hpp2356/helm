@@ -1,7 +1,10 @@
 import { type Tool } from "@helm/core";
+import { type PermissionRuntime } from "./permission-runtime.js";
 
 export class ToolRuntime {
   private tools: Map<string, Tool> = new Map();
+
+  constructor(private permissionRuntime?: PermissionRuntime) {}
 
   register(tool: Tool): void {
     if (this.tools.has(tool.name)) {
@@ -31,6 +34,15 @@ export class ToolRuntime {
     if (!tool) {
       return `Error: unknown tool "${name}"`;
     }
+
+    // Permission check (if PermissionRuntime is configured)
+    if (this.permissionRuntime) {
+      const decision = this.permissionRuntime.check(name, args);
+      if (!decision.allowed) {
+        return `Error: permission denied — ${decision.reason}`;
+      }
+    }
+
     try {
       return await tool.execute(args);
     } catch (err) {
