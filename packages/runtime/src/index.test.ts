@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { ScriptedProvider, AgentLoop, ToolRuntime, type AgentLoopOptions } from "./index.js";
+import { ScriptedProvider, AgentLoop, ToolRuntime, PermissionRuntime, type AgentLoopOptions } from "./index.js";
+import { RiskLevel } from "@helm/core";
 
 describe("@helm/runtime", () => {
   it("should export ScriptedProvider", () => {
@@ -12,6 +13,15 @@ describe("@helm/runtime", () => {
 
   it("should export ToolRuntime", () => {
     expect(typeof ToolRuntime).toBe("function");
+  });
+
+  it("should export PermissionRuntime", () => {
+    expect(typeof PermissionRuntime).toBe("function");
+  });
+
+  it("should export permission types from core", () => {
+    expect(RiskLevel).toBeDefined();
+    expect(RiskLevel.LOW).toBe("LOW");
   });
 
   it("should re-export AgentLoopOptions as a type (compile-time check)", () => {
