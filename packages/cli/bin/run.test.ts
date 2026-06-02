@@ -33,4 +33,22 @@ describe("CLI smoke test", () => {
     );
     expect(result).toContain("permission denied");
   });
+
+  it("normal run exits 0", () => {
+    let status: number | null = null;
+    let output = "";
+    try {
+      output = execSync(
+        `node ${bin} ${tools} ${script} ${perms} cli-test-exit-ok`,
+        { encoding: "utf-8" }
+      );
+      status = 0;
+    } catch (err) {
+      const e = err as { status?: number; stdout?: Buffer | string };
+      status = e.status ?? 1;
+      output = String(e.stdout ?? "");
+    }
+    expect(status).toBe(0);
+    expect(output).toContain("RUN END");
+  });
 });

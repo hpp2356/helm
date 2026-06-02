@@ -25,6 +25,12 @@ export type RunEvent =
       message: string;
       stack?: string;
       timestamp: number;
+    }
+  | {
+      type: "run:cancelled";
+      runId: string;
+      reason: "external" | "timeout";
+      timestamp: number;
     };
 
 export function eventToString(event: RunEvent): string {
