@@ -1,21 +1,19 @@
-# Helm Manual Walkthrough (PR00–PR05)
+# Helm 手动走查 (PR00–PR05)
 
-## How to read this document
+## 如何使用本文档
 
-This is a **trace-reading exercise**, not a test plan. Vitest already covers
-correctness; this guide covers _understanding_. Each PR adds new event types
-or new harness machinery, and the JSONL journal is the single artifact where
-that machinery shows up at runtime — think SLF4J structured logs, but framed
-as event sourcing for an agent run. After every command you'll open a `.jsonl`
-file and read the events it produced; the focus is "what's new in the trace
-this PR".
+这是一份**读 trace 的练习**，不是测试用例。Vitest 已经覆盖了正确性，本文档
+覆盖的是**理解**。每个 PR 都会往 journal 里加新的事件类型或者新的 harness 机制，
+而 JSONL journal 就是这些机制在运行时唯一会留下痕迹的地方 —— 类比 SLF4J 的
+结构化日志，但是是把 agent run 当事件溯源（Event Sourcing）来记录。每个命令
+跑完以后，你会打开一个 `.jsonl` 文件去读它产生的事件；重点是
+"这个 PR 在 trace 里多出了什么"。
 
-PR00–PR03 don't ship an end-user CLI surface — those PRs landed only in
-`packages/core` and `packages/runtime`, so we exercise them through their
-unit tests. The user-runnable CLI (`packages/cli/bin/run.js`) lands in PR04
-and is what we use from PR04 onward.
+PR00–PR03 没有给最终用户暴露 CLI —— 这几个 PR 只落在 `packages/core` 和
+`packages/runtime`，所以我们通过它们的单元测试来观察。可执行的 CLI
+（`packages/cli/bin/run.js`）从 PR04 开始才有，从 PR04 起我们就用它。
 
-## Setup (run once)
+## 前置准备 (只跑一次)
 
 ```bash
 cd ~/projects-ai/helm/helm-dev
@@ -23,24 +21,24 @@ pnpm install
 pnpm build
 ```
 
-Journals from CLI runs land in `/tmp/helm-<runId>.jsonl`. The CLI prints the
-exact path at the bottom of its output.
+CLI 跑完产生的 journal 会落在 `/tmp/helm-<runId>.jsonl`。CLI 在输出最底下会
+打印精确路径。
 
 ```bash
-ls /tmp/helm-*.jsonl 2>/dev/null   # see all journals you've produced
+ls /tmp/helm-*.jsonl 2>/dev/null   # 看自己跑出来过哪些 journal
 ```
 
-## PR00 — Bootstrap monorepo
+## PR00 — 引导 monorepo
 
-### What this PR added to the harness
+### 这个 PR 给 harness 加了什么
 
-The TypeScript pnpm workspace itself: `packages/core`, `packages/runtime`,
-`packages/eval`, `packages/replay`, plus shared `tsconfig.base.json` and the
-root scripts (`typecheck`, `test`, `build`).
+TypeScript pnpm workspace 本身：`packages/core`、`packages/runtime`、
+`packages/eval`、`packages/replay`，还有共用的 `tsconfig.base.json` 和
+根目录脚本（`typecheck`、`test`、`build`）。
 
-### Walkthrough
+### 走查
 
-No journal yet. Verify the workspace builds:
+还没有 journal。验证 workspace 能编译：
 
 ```bash
 pnpm install
@@ -48,75 +46,73 @@ pnpm build
 pnpm typecheck
 ```
 
-You should see five packages compile cleanly (`@helm/core`, `@helm/runtime`,
-`@helm/eval`, `@helm/replay`, `@helm/cli` — the last only after PR04). Nothing
-else to look at; this PR is pure infrastructure, like running `mvn -N install`
-on a brand-new multi-module Maven parent before any of the modules have code.
+应该看到 5 个 package 都干净通过（`@helm/core`、`@helm/runtime`、
+`@helm/eval`、`@helm/replay`、`@helm/cli` —— 最后一个要等 PR04 才有）。
+没别的可看的；这个 PR 是纯基础设施，类比 Java 里在还没写任何模块代码之前
+对一个全新的多模块 Maven 父工程跑 `mvn -N install`。
 
 ## PR01 — RunEvent + JsonlJournal
 
-### What this PR added to the harness
+### 这个 PR 给 harness 加了什么
 
-The first persistent artifact: a discriminated-union `RunEvent` type and a
-`JsonlJournal` writer that appends one JSON object per line. Nothing reads
-this journal yet — the loop and tools don't exist — so the only way to see
-it in action is the journal's own tests.
+第一份持久化产物：一个 discriminated-union 的 `RunEvent` 类型，外加一个
+`JsonlJournal` writer，每行 append 一个 JSON 对象。这一步 journal 还没
+被任何东西读 —— loop 和 tools 都还没有 —— 所以唯一能看到它跑起来的方式
+就是 journal 自己的测试。
 
-### Walkthrough
+### 走查
 
 ```bash
 pnpm --filter @helm/core exec vitest run src/journal.test.ts --reporter=verbose
 ```
 
-You'll see six green tests. The interesting ones are:
+会看到 6 个绿色测试。比较有意思的两个：
 
-- `should append multiple events as separate JSONL lines` — proves the
-  contract: each `append(event)` writes exactly one line, no embedded
-  newlines.
-- `should reopen and append to an existing file` — `open` uses `"a"` mode,
-  so journals are append-only across runs.
+- `should append multiple events as separate JSONL lines` —— 证明契约：
+  每次 `append(event)` 写恰好一行，行内不嵌入 newline。
+- `should reopen and append to an existing file` —— `open` 用的是 `"a"`
+  模式，所以 journal 跨多次运行都是 append-only。
 
-To **see** what those events look like serialized, read
-`packages/core/src/events.test.ts` — every variant of `RunEvent` is
-constructed there. The PR01 set is: `run:start`, `run:end`, `turn:start`,
-`turn:end`, `tool:call`, `tool:result`, `error`. (`run:cancelled` is added
-in PR05.)
+要**看**这些事件序列化之后长什么样，去读
+`packages/core/src/events.test.ts` —— `RunEvent` 的每个 variant 都在那里
+被构造出来。PR01 那一批是：`run:start`、`run:end`、`turn:start`、
+`turn:end`、`tool:call`、`tool:result`、`error`。（`run:cancelled` 是
+PR05 才加的。）
 
-### Try this
+### 试一下
 
-Open `packages/core/src/events.ts` and scan the union. Every later PR
-either emits one of these existing variants or extends the union — the file
-is a one-page contract for what can happen during a run.
+打开 `packages/core/src/events.ts` 扫一眼这个 union。后面每个 PR 要么发出
+里面已经有的 variant，要么扩展这个 union —— 这个文件就是一份单页契约，
+说明一次 run 期间能发生哪些事。
 
-> Honesty note: `turn:end` is _declared_ in the union but the AgentLoop
-> never emits it. `turn:start` is the only turn-boundary event you'll
-> see in any real journal. This is consistent across PR02–PR05; flagged
-> here so you don't go hunting for it.
+> 老实说一句：`turn:end` 在 union 里是**声明了**的，但 AgentLoop 从来没
+> 真的发过它。`turn:start` 才是你在任何真实 journal 里能看到的唯一
+> turn 边界事件。PR02–PR05 也都是这样；这里先标出来，免得你白跑去找。
 
-## PR02 — ScriptedProvider + minimal AgentLoop
+## PR02 — ScriptedProvider + 最小 AgentLoop
 
-### What this PR added to the harness
+### 这个 PR 给 harness 加了什么
 
-A toy `Provider` (`ScriptedProvider`) that returns a pre-canned list of
-`Message`s in order, and an `AgentLoop` that drives turns: ask the provider
-for a message, journal it, and stop when the assistant returns no tool calls
-or `maxTurns` is hit.
+一个玩具 `Provider`（`ScriptedProvider`），按顺序返回一份预先准备好的
+`Message` 列表；外加一个 `AgentLoop`，驱动每一个 turn：找 provider 要
+一条消息，写 journal，等 assistant 不再返回 tool calls 或者 `maxTurns`
+打到了就停。
 
-There are no tool calls yet — `tool:call` / `tool:result` won't appear until
-PR03 wires them in. So the AgentLoop in PR02 produces only `run:start`,
-`turn:start`, and `run:end`.
+这一步还没有 tool 调用 —— `tool:call` / `tool:result` 要到 PR03 把它们
+接进来才会出现。所以 PR02 的 AgentLoop 只会产生 `run:start`、
+`turn:start`、`run:end`。
 
-### Walkthrough
+### 走查
 
-The end-to-end runtime test from PR03 prints a journal we can read inline,
-but PR02 ships its own AgentLoop tests:
+PR03 加进来的端到端 runtime 测试会把 journal 直接打到屏幕上，但 PR02
+自己也带了 AgentLoop 的测试：
 
 ```bash
 pnpm --filter @helm/runtime exec vitest run src/agent-loop.test.ts --reporter=verbose
 ```
 
-The first test, **"runs a simple no-tool turn"**, asserts the journal has
-exactly three lines for a single-message script:
+第一个测试 **"runs a simple no-tool turn"** 断言：单消息脚本下的 journal
+正好是三行：
 
 ```
 run:start
@@ -124,35 +120,35 @@ turn:start
 run:end
 ```
 
-That's the PR02 minimum: open a run, run one turn, close the run.
+这就是 PR02 的最小集合：开一个 run，跑一个 turn，关掉 run。
 
-### Try this
+### 试一下
 
-Look at `packages/runtime/src/agent-loop.ts:30` — the `for` loop that walks
-turns. The exit condition `response.toolCalls?.length > 0` is the entire
-"agent" decision in PR02: keep going if the assistant asked for tools, stop
-if it didn't. PR03 fills in what "asked for tools" actually does.
+去看 `packages/runtime/src/agent-loop.ts:30` —— 那个遍历 turn 的 `for`
+循环。退出条件 `response.toolCalls?.length > 0` 就是 PR02 里"agent"全部的
+决策：assistant 要 tool 就继续，不要就停。PR03 才填进去"要 tool"具体
+做什么。
 
 ## PR03 — ToolRuntime
 
-### What this PR added to the harness
+### 这个 PR 给 harness 加了什么
 
-A `ToolRuntime` registry and the wiring in AgentLoop that, when an assistant
-message has `toolCalls`, journals a `tool:call`, executes the tool, journals
-the `tool:result`, and feeds the result back as a `role: "tool"` message.
+一个 `ToolRuntime` 注册表，外加 AgentLoop 里的接线：当 assistant 消息
+带 `toolCalls` 时，先写一个 `tool:call`，跑这个 tool，写 `tool:result`，
+然后把结果作为一条 `role: "tool"` 消息塞回消息历史。
 
-This is the first PR where the journal really starts to look like an agent
-trace: turn → tool:call → tool:result → turn.
+这是 journal 第一次真正长得像 agent trace 的 PR：
+turn → tool:call → tool:result → turn。
 
-### Walkthrough
+### 走查
 
-The `runtime` package ships a printable end-to-end demo test:
+`runtime` package 自带一个会把结果打到屏幕的端到端 demo 测试：
 
 ```bash
 pnpm --filter @helm/runtime exec vitest run src/demo.test.ts --reporter=verbose
 ```
 
-In the `stdout` block of the test you'll see the journal printed in order:
+在测试的 `stdout` 段里你会按顺序看到 journal：
 
 ```
 🚀 [hh:mm:ss] RUN START   id=demo-run-1
@@ -164,40 +160,38 @@ In the `stdout` block of the test you'll see the journal printed in order:
 Total: 6 events
 ```
 
-The `tool:call` and `tool:result` events are new in this PR. Note also the
-**second** `turn:start` — turn 0 ran the tool, turn 1 asked the provider
-again (the assistant now has the tool's output in its message history) and
-this time the provider returned a final answer with no `toolCalls`, so the
-loop exited.
+`tool:call` 和 `tool:result` 是这个 PR 新加的事件。还要注意**第二个**
+`turn:start` —— turn 0 跑了 tool，turn 1 又一次去问 provider（assistant
+的消息历史里现在有了 tool 输出），这次 provider 给的最终回答里没有
+`toolCalls`，所以 loop 结束。
 
-### Try this
+### 试一下
 
-Open `packages/runtime/src/agent-loop.ts:62`. The inner `for (const tc of
-response.toolCalls)` loop is what turns one assistant message into N pairs
-of `tool:call` / `tool:result` events. `tc.id` is what later turns will use
-to match a `role: "tool"` reply back to the right call — same idea as
-OpenAI/Anthropic tool-use IDs.
+打开 `packages/runtime/src/agent-loop.ts:62`。里面那个
+`for (const tc of response.toolCalls)` 内层循环，就是把一条 assistant
+消息变成 N 对 `tool:call` / `tool:result` 事件的地方。`tc.id` 是后续 turn
+用来把 `role: "tool"` 回消息匹配回正确那次 call 的字段 —— 跟
+OpenAI/Anthropic 的 tool-use ID 是同一个思路。
 
-## PR04 — Permission/Risk + minimal CLI
+## PR04 — Permission/Risk + 最小 CLI
 
-### What this PR added to the harness
+### 这个 PR 给 harness 加了什么
 
-Two things landed together in PR04:
+PR04 一次性塞了两件事：
 
-1. `PermissionRuntime` with `RiskLevel` (`LOW`, `MEDIUM`, `HIGH`,
-   `CRITICAL`), allow/deny rules, and pattern matching (trailing `*` wildcard).
-   Wired into `ToolRuntime`: every `execute()` first asks the
-   `PermissionRuntime` whether the call is allowed.
-2. `packages/cli/bin/run.js` — the first user-runnable surface. It loads a
-   tools file, a script file, a perms file, builds a real AgentLoop, and
-   tails the journal to stdout in real time.
+1. `PermissionRuntime`，带 `RiskLevel`（`LOW`、`MEDIUM`、`HIGH`、
+   `CRITICAL`），allow/deny 规则，pattern 匹配（尾部 `*` 当通配符）。
+   接进了 `ToolRuntime`：每次 `execute()` 之前，先问 `PermissionRuntime`
+   这次调用允不允许。
+2. `packages/cli/bin/run.js` —— 第一个面向用户的可执行入口。它加载
+   tools 文件、script 文件、perms 文件，构造一个真正的 AgentLoop，
+   并实时把 journal 打到 stdout。
 
-A denied tool call does **not** crash the run — the `tool:result` event
-records the denial as the tool's "output", so the assistant can react to it
-in subsequent turns. (No new event variant: permission denial reuses
-`tool:result`.)
+被 deny 的 tool 调用**不会**让 run 崩 —— `tool:result` 事件会把这次
+拒绝当作 tool 的"输出"记下来，这样 assistant 在后续 turn 里还能根据
+这个反馈做反应。（没有新 event variant：权限拒绝复用 `tool:result`。）
 
-### Walkthrough — allowed run
+### 走查 —— 允许的 run
 
 ```bash
 node packages/cli/dist/bin/run.js \
@@ -208,13 +202,13 @@ node packages/cli/dist/bin/run.js \
 cat /tmp/helm-walkthrough-normal.jsonl
 ```
 
-The fixture's `perms.json` allows `calculator` at MEDIUM and `weather` at LOW.
-The journal looks like PR03's demo trace — same six events. The new bit lives
-inside `ToolRuntime.execute`: before delegating to the tool, it consults the
-`PermissionRuntime`. Because the rule is `allow`, you don't see a difference
-in the trace. (That's the point — allow is the silent path.)
+fixture 里的 `perms.json` 把 `calculator` 设成 MEDIUM allow，把 `weather`
+设成 LOW allow。journal 看起来跟 PR03 demo 的 trace 一样 —— 同样 6 个
+事件。新东西藏在 `ToolRuntime.execute` 里：在把活儿交给 tool 之前，
+它先去问 `PermissionRuntime`。因为规则是 `allow`，trace 里看不出区别。
+（这正是要点 —— allow 是一条"沉默"的路径。）
 
-### Walkthrough — denied run
+### 走查 —— 被拒绝的 run
 
 ```bash
 node packages/cli/dist/bin/run.js \
@@ -225,9 +219,9 @@ node packages/cli/dist/bin/run.js \
 cat /tmp/helm-walkthrough-deny.jsonl
 ```
 
-`perms-deny-calc.json` has both an allow and a deny for `calculator`, with
-the deny at CRITICAL risk. Deny wins. The trace's `tool:result` line carries
-the rejection:
+`perms-deny-calc.json` 里 `calculator` 同时有一条 allow 和一条 deny，
+deny 标的是 CRITICAL risk。Deny 胜出。trace 里的 `tool:result` 这一行
+带着拒绝信息：
 
 ```json
 {"type":"tool:result","runId":"walkthrough-deny","turnIndex":0,"toolName":"calculator",
@@ -235,37 +229,36 @@ the rejection:
  "timestamp":...}
 ```
 
-The run still ends with `exitCode=0` — permission denial is a tool-level
-outcome, not a run-level failure.
+run 仍然以 `exitCode=0` 结束 —— 权限拒绝是 tool 层的产出，不是 run 层的
+失败。
 
-### Try this
+### 试一下
 
-Open `packages/cli/fixtures/perms-deny-calc.json` and change the deny risk
-level to `LOW`, then re-run. The deny still wins regardless of risk level —
-risk is metadata recorded with the rule, not part of the precedence logic.
-Look at `packages/runtime/src/permission-runtime.ts` to confirm: deny rules
-are checked before allow rules, and the risk level is just propagated into
-the rejection message.
+打开 `packages/cli/fixtures/perms-deny-calc.json`，把 deny 那条的 risk
+改成 `LOW`，再跑一遍。无论 risk 等级是什么，deny 都还是赢 —— risk
+只是规则的元数据，不参与优先级判断。去 `packages/runtime/src/permission-runtime.ts`
+确认一下：deny 规则会比 allow 规则先被检查，risk level 只是被原样塞进
+拒绝信息里。
 
 ## PR05 — Cancellation / Timeout
 
-### What this PR added to the harness
+### 这个 PR 给 harness 加了什么
 
-- `run:cancelled` event variant with `reason: "external" | "timeout"`.
-- Optional `signal?: AbortSignal` on `Tool.execute` and `Provider.send`.
-- `AgentLoop` accepts `signal` and `maxDurationMs` options. Internally it
-  builds one `AbortController` whose `abort()` is triggered by either the
-  external signal or a `setTimeout(maxDurationMs)`. The signal is checked
-  at turn boundaries, around `provider.send`, and around each `tool.execute`.
-- Cancellation exits with exit code `130` (the SIGINT convention).
-- The CLI gains `--timeout=<ms>` and a `SIGINT` handler. There's also an
-  undocumented helper flag `--turn-delay-ms=<ms>` that wraps the provider
-  in an artificial delay; useful for demoing cancellation against the
-  scripted provider, which would otherwise return instantly.
+- `run:cancelled` 事件，带 `reason: "external" | "timeout"`。
+- `Tool.execute` 和 `Provider.send` 多了可选的 `signal?: AbortSignal`。
+- `AgentLoop` 接受 `signal` 和 `maxDurationMs` 选项。内部建一个
+  `AbortController`，外部 signal 或者 `setTimeout(maxDurationMs)` 任一
+  触发都会调它的 `abort()`。signal 在 turn 边界、`provider.send` 前后、
+  以及每次 `tool.execute` 前后被检查。
+- 取消会以退出码 `130` 结束（SIGINT 的惯例）。
+- CLI 多了 `--timeout=<ms>` 和一个 `SIGINT` handler。还有一个没在用法里
+  写出来的辅助 flag `--turn-delay-ms=<ms>`，它会把 provider 包一层人造
+  延迟；用来在 scripted provider（否则瞬间返回）面前演示 cancellation
+  很方便。
 
-### Walkthrough — normal exit
+### 走查 —— 正常退出
 
-Same command as PR04's allowed run; we re-run for completeness:
+跟 PR04 那条允许的 run 命令一样，为了完整性再跑一遍：
 
 ```bash
 node packages/cli/dist/bin/run.js \
@@ -276,14 +269,14 @@ node packages/cli/dist/bin/run.js \
 echo "exit=$?"   # → 0
 ```
 
-The trace ends with `run:end exitCode=0`. No `run:cancelled` event.
-This confirms the timeout path is not entered when none is configured.
+trace 以 `run:end exitCode=0` 收尾。没有 `run:cancelled` 事件。
+说明在没配 timeout 的情况下，timeout 那条路径根本没进。
 
-### Walkthrough — timeout
+### 走查 —— 超时
 
-The scripted provider returns immediately, so a timeout has nothing to fire
-against unless we slow it down. `--turn-delay-ms` injects 200 ms per
-provider call, and `--timeout=50` fires the internal abort after 50 ms:
+scripted provider 是瞬间返回的，所以如果不放慢它，timeout 就没东西可以
+触发。`--turn-delay-ms` 给每次 provider 调用注入 200 ms 延迟，
+`--timeout=50` 在 50 ms 后触发内部 abort：
 
 ```bash
 node packages/cli/dist/bin/run.js \
@@ -296,7 +289,7 @@ echo "exit=$?"   # → 130
 cat /tmp/helm-walkthrough-timeout.jsonl
 ```
 
-Trace:
+trace：
 
 ```
 run:start
@@ -305,15 +298,15 @@ run:cancelled reason=timeout
 run:end exitCode=130
 ```
 
-The interrupt landed inside `provider.send` — turn 0 had started but never
-finished, which is why there's no `tool:call` for that turn. The abort
-listener inside the slow-provider wrapper rejected the in-flight `setTimeout`
-with an `AbortError`; AgentLoop saw `controller.signal.aborted` was true
-and routed that into a `run:cancelled` event rather than an `error` event.
+中断发生在 `provider.send` 内部 —— turn 0 已经开始但没跑完，所以这个
+turn 里看不到 `tool:call`。慢 provider 包装层里的 abort listener 用一个
+`AbortError` reject 掉了那个还在跑的 `setTimeout`；AgentLoop 看到
+`controller.signal.aborted` 是 true，把它路由成 `run:cancelled` 事件
+而不是 `error` 事件。
 
-### Walkthrough — Ctrl-C
+### 走查 —— Ctrl-C
 
-In one shell:
+开一个 shell：
 
 ```bash
 node packages/cli/dist/bin/run.js \
@@ -324,7 +317,7 @@ node packages/cli/dist/bin/run.js \
   --turn-delay-ms=2000
 ```
 
-Press **Ctrl-C** within the first second. You'll see:
+在第 1 秒之内按 **Ctrl-C**。会看到：
 
 ```
 ^C received — cancelling run...
@@ -332,7 +325,7 @@ Press **Ctrl-C** within the first second. You'll see:
 ✅ [hh:mm:ss] RUN END      exitCode=130
 ```
 
-`cat /tmp/helm-walkthrough-sigint.jsonl` to confirm the events:
+`cat /tmp/helm-walkthrough-sigint.jsonl` 确认事件：
 
 ```
 run:start
@@ -341,49 +334,46 @@ run:cancelled reason=external
 run:end exitCode=130
 ```
 
-Same shape as the timeout case but `reason=external`. The CLI's `SIGINT`
-handler called `controller.abort()` on its own `AbortController`, which is
-passed in as `options.signal` to `AgentLoop` — the loop's internal merged
-controller fires, the in-flight provider call rejects, and we land on the
-external-cancellation branch.
+形状跟 timeout 那条一样，只是 `reason=external`。CLI 的 `SIGINT` handler
+对自己那个 `AbortController` 调了 `abort()`，这个 controller 是作为
+`options.signal` 传给 `AgentLoop` 的 —— loop 里那个合并的内部 controller
+也跟着 abort，正在跑的 provider 调用 reject 掉，最后落到 external
+取消那个分支。
 
-### Try this
+### 试一下
 
-Re-run the timeout case with `--timeout=5` (so the timer fires before the
-provider is even called). The `run:cancelled` event still appears, but in
-some cases you'll see it _before_ any `turn:start` — the loop's pre-loop
-cancellation check (`agent-loop.ts:81`) catches the already-aborted signal
-right after `run:start`. Compare that against `--timeout=50
---turn-delay-ms=200`, where you do get a `turn:start` first. That tells you
-exactly which boundary check caught the cancel.
+把 timeout case 改成 `--timeout=5` 再跑一次（让定时器在 provider 都还
+没被调用之前就触发）。`run:cancelled` 事件还是会出现，但有时候你会发现
+它在任何 `turn:start` 之前就出现了 —— loop 的 pre-loop 取消检查
+（`agent-loop.ts:81`）会在 `run:start` 之后立刻拦下"已经 abort"的 signal。
+对比一下 `--timeout=50 --turn-delay-ms=200`，那个会先有一个
+`turn:start`。这能告诉你：到底是哪个边界检查抓到了取消。
 
-## Appendix A — Event type reference
+## 附录 A —— 事件类型速查
 
-Source of truth: `packages/core/src/events.ts`.
+源头：`packages/core/src/events.ts`。
 
-| Event              | PR introduced | Meaning                                                              |
-| ------------------ | ------------- | -------------------------------------------------------------------- |
-| `run:start`        | PR01          | A run has been opened; first event in every journal                  |
-| `run:end`          | PR01          | A run has terminated; carries `exitCode` (0 normal, 130 cancelled)   |
-| `turn:start`       | PR01          | An agent turn is beginning; emitted at the top of each loop iter     |
-| `turn:end`         | PR01          | _Declared but never emitted_ — see honesty note in PR01 section      |
-| `tool:call`        | PR01 (type) / PR03 (emitted) | Assistant requested a tool with these args                          |
-| `tool:result`      | PR01 (type) / PR03 (emitted) | Tool returned this output (or a permission-denied message in PR04)  |
-| `error`            | PR01 (type) / PR02 (emitted) | Provider threw something not caused by abort                        |
-| `run:cancelled`    | PR05          | Run is ending due to external abort or timeout; carries `reason`     |
+| 事件               | 引入的 PR     | 含义                                                            |
+| ------------------ | ------------- | --------------------------------------------------------------- |
+| `run:start`        | PR01          | 一次 run 开启；每个 journal 的第一个事件                        |
+| `run:end`          | PR01          | run 结束；带 `exitCode`（0 正常，130 被取消）                   |
+| `turn:start`       | PR01          | agent turn 开始；每次 loop 迭代顶部发一次                       |
+| `turn:end`         | PR01          | _声明了但从来没被发出_ —— 见 PR01 那段的"老实说一句"            |
+| `tool:call`        | PR01 (类型) / PR03 (发出) | assistant 用这些 args 请求了一个 tool                |
+| `tool:result`      | PR01 (类型) / PR03 (发出) | tool 返回了这个输出（PR04 起也可能是权限拒绝信息）   |
+| `error`            | PR01 (类型) / PR02 (发出) | provider 抛了一个不是 abort 引起的异常               |
+| `run:cancelled`    | PR05          | run 因为外部 abort 或 timeout 在结束；带 `reason`               |
 
-The exact field shape for each variant is at the top of `events.ts`. There
-are no optional schema versioning fields yet — every consumer must accept
-all variants or it's a code change in `core`.
+每个 variant 的精确字段形状在 `events.ts` 顶部。目前还没有可选的 schema
+版本字段 —— 任何 consumer 都得接受所有 variant，不然就得改 `core` 的代码。
 
-## Appendix B — IDE debugging (optional)
+## 附录 B —— IDE 调试 (可选)
 
-Skipped intentionally. The CLI runs from compiled JS under
-`packages/cli/dist/bin/run.js`, so a working VS Code launch config would
-need either a separate `tsx`/source-map setup or a build-then-attach flow.
-Neither is wired up in the repo today, and inventing one untested would
-violate the spirit of this guide. If you want a breakpoint in the meantime,
-the simplest thing that works is:
+故意没做。CLI 是从编译产物 `packages/cli/dist/bin/run.js` 跑起来的，要
+让 VS Code 的 launch config 跑起来，要么得另接一套 `tsx`/source map，
+要么得走"先 build 再 attach"的流程。今天 repo 里这两条都没接，凭空
+编一个没测过的版本会违背本指南的精神。如果你现在就想下断点，最简单
+能跑通的做法是：
 
 ```bash
 node --inspect-brk packages/cli/dist/bin/run.js \
@@ -393,9 +383,8 @@ node --inspect-brk packages/cli/dist/bin/run.js \
   debug-run
 ```
 
-then attach VS Code's "Node: Attach" config to `localhost:9229`. Source
-maps are emitted by `tsc` because `tsconfig.base.json` is the default,
-so breakpoints in `packages/runtime/src/agent-loop.ts` will hit when the
-compiled file runs. This works but is not project-wired — adding a real
-`.vscode/launch.json` belongs in a future PR after we agree on the
-debugging story.
+然后用 VS Code 的 "Node: Attach" 配置 attach 到 `localhost:9229`。因为
+`tsconfig.base.json` 默认就开了 source map，`tsc` 编出来是带 source map
+的，所以 `packages/runtime/src/agent-loop.ts` 里的断点会在编译产物跑到
+对应行的时候命中。这条路能跑，但 repo 里没接 —— 真要加一份
+`.vscode/launch.json` 应该等我们对调试方案达成共识之后再单独开 PR。
