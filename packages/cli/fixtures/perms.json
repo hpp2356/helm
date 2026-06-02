@@ -1,0 +1,4 @@
+[
+  { "action": "allow", "pattern": "calculator", "riskLevel": "MEDIUM", "description": "arithmetic is safe" },
+  { "action": "allow", "pattern": "weather", "riskLevel": "LOW", "description": "weather is read-only" }
+]

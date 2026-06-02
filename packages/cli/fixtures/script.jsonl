@@ -1,0 +1,2 @@
+{"role":"assistant","content":"Let me calculate.","toolCalls":[{"id":"tc1","name":"calculator","args":{"expression":"2+3"}}]}
+{"role":"assistant","content":"The result is 5."}

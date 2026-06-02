@@ -1,0 +1,20 @@
+[
+  {
+    "name": "calculator",
+    "description": "evaluates an expression",
+    "parameters": {
+      "type": "object",
+      "properties": { "expression": { "type": "string" } },
+      "required": ["expression"]
+    }
+  },
+  {
+    "name": "weather",
+    "description": "gets weather for a city",
+    "parameters": {
+      "type": "object",
+      "properties": { "city": { "type": "string" } },
+      "required": ["city"]
+    }
+  }
+]
