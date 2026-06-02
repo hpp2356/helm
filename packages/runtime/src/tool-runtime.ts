@@ -29,7 +29,11 @@ export class ToolRuntime {
     return Array.from(this.tools.keys());
   }
 
-  async execute(name: string, args: Record<string, unknown>): Promise<string> {
+  async execute(
+    name: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal
+  ): Promise<string> {
     const tool = this.tools.get(name);
     if (!tool) {
       return `Error: unknown tool "${name}"`;
@@ -44,8 +48,12 @@ export class ToolRuntime {
     }
 
     try {
-      return await tool.execute(args);
+      return await tool.execute(args, signal);
     } catch (err) {
+      // Re-throw AbortError so AgentLoop can route it to a cancelled event
+      if (err instanceof Error && err.name === "AbortError") {
+        throw err;
+      }
       return `Error: ${err instanceof Error ? err.message : String(err)}`;
     }
   }

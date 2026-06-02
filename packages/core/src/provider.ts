@@ -10,5 +10,5 @@ export interface ToolCall {
 }
 
 export interface Provider {
-  send(messages: Message[]): Promise<Message>;
+  send(messages: Message[], signal?: AbortSignal): Promise<Message>;
 }

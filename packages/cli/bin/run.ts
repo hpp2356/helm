@@ -46,16 +46,42 @@ function formatTime(): string {
 }
 
 async function main() {
-  const args = process.argv.slice(2);
-  if (args.length < 3) {
+  const rawArgs = process.argv.slice(2);
+  const positional: string[] = [];
+  let timeoutMs: number | undefined;
+  let turnDelayMs = 0;
+  for (const arg of rawArgs) {
+    if (arg.startsWith("--timeout=")) {
+      const v = Number(arg.slice("--timeout=".length));
+      if (!Number.isFinite(v) || v <= 0) {
+        console.error(`Invalid --timeout value: ${arg}`);
+        process.exit(1);
+      }
+      timeoutMs = v;
+    } else if (arg === "--timeout") {
+      console.error("--timeout requires a value, e.g. --timeout=5000");
+      process.exit(1);
+    } else if (arg.startsWith("--turn-delay-ms=")) {
+      const v = Number(arg.slice("--turn-delay-ms=".length));
+      if (!Number.isFinite(v) || v < 0) {
+        console.error(`Invalid --turn-delay-ms value: ${arg}`);
+        process.exit(1);
+      }
+      turnDelayMs = v;
+    } else {
+      positional.push(arg);
+    }
+  }
+
+  if (positional.length < 3) {
     console.error(
-      "Usage: helm run <tools.json> <script.jsonl> <perms.json> [runId]"
+      "Usage: helm run <tools.json> <script.jsonl> <perms.json> [runId] [--timeout=<ms>]"
     );
     process.exit(1);
   }
 
-  const [toolsPath, scriptPath, permsPath] = args;
-  const runId = args[3] ?? `run-${Date.now()}`;
+  const [toolsPath, scriptPath, permsPath] = positional;
+  const runId = positional[3] ?? `run-${Date.now()}`;
 
   // 1. Load permissions
   const permRules = loadJson<PermRule[]>(permsPath);
@@ -100,7 +126,23 @@ async function main() {
     (s) => ({ role: s.role, content: s.content, toolCalls: s.toolCalls }) as Message
   );
 
-  const provider = new ScriptedProvider(messages);
+  const baseProvider = new ScriptedProvider(messages);
+  const provider = turnDelayMs > 0
+    ? {
+        async send(msgs: Message[], signal?: AbortSignal): Promise<Message> {
+          await new Promise<void>((resolve, reject) => {
+            const t = setTimeout(resolve, turnDelayMs);
+            signal?.addEventListener("abort", () => {
+              clearTimeout(t);
+              const err = new Error("aborted");
+              err.name = "AbortError";
+              reject(err);
+            });
+          });
+          return baseProvider.send(msgs, signal);
+        },
+      }
+    : baseProvider;
 
   // 4. Create journal
   const journalPath = `/tmp/helm-${runId}.jsonl`;
@@ -135,6 +177,9 @@ async function main() {
       case "error":
         console.log(`❌ [${ts}] ERROR        ${event.message}`);
         break;
+      case "run:cancelled":
+        console.log(`🛑 [${ts}] CANCELLED    reason=${event.reason}`);
+        break;
       case "run:end":
         console.log(`✅ [${ts}] RUN END      exitCode=${event.exitCode}`);
         break;
@@ -146,16 +191,32 @@ async function main() {
   console.log(`\n${"=".repeat(50)}`);
   console.log(`Helm CLI — runId: ${runId}`);
   console.log(
-    `Tools: ${toolDefs.length}, Script: ${scriptLines.length}, Perms: ${permRules.length}`
+    `Tools: ${toolDefs.length}, Script: ${scriptLines.length}, Perms: ${permRules.length}` +
+      (timeoutMs !== undefined ? `, Timeout: ${timeoutMs}ms` : "")
   );
   console.log(`Journal: ${journalPath}`);
   console.log(`${"=".repeat(50)}\n`);
 
-  const loop = new AgentLoop(provider, toolRuntime, journal, { maxTurns: 10 });
-  await loop.run(runId, "User request (script-driven)");
+  const sigintController = new AbortController();
+  const onSigint = () => {
+    console.log("\n^C received — cancelling run...");
+    sigintController.abort();
+  };
+  process.on("SIGINT", onSigint);
 
+  const loop = new AgentLoop(provider, toolRuntime, journal, {
+    maxTurns: 10,
+    signal: sigintController.signal,
+    maxDurationMs: timeoutMs,
+  });
+  const result = await loop.run(runId, "User request (script-driven)");
+
+  process.off("SIGINT", onSigint);
   await journal.close();
   console.log(`\nDone. Journal → ${journalPath}`);
+  if (result.exitCode !== 0) {
+    process.exit(result.exitCode);
+  }
 }
 
 main().catch((err) => {
