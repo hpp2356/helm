@@ -29,7 +29,14 @@ importers:
 
   packages/core: {}
 
-  packages/eval: {}
+  packages/eval:
+    dependencies:
+      '@helm/core':
+        specifier: workspace:*
+        version: link:../core
+      '@helm/runtime':
+        specifier: workspace:*
+        version: link:../runtime
 
   packages/replay: {}
 
