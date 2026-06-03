@@ -1,5 +1,11 @@
-import { type Provider, type JsonlJournal } from "@helm/core";
+import { type Provider, type JsonlJournal, classifyAgentError } from "@helm/core";
 import { type ToolRuntime } from "./tool-runtime.js";
+import {
+  type RetryPolicy,
+  DEFAULT_RETRY_POLICY,
+  computeDelay,
+  delayWithAbort,
+} from "./retry.js";
 
 export interface AgentLoopOptions {
   maxTurns: number;
@@ -7,6 +13,12 @@ export interface AgentLoopOptions {
   signal?: AbortSignal;
   /** Optional wall-clock cap in ms — fires an internal abort when exceeded. */
   maxDurationMs?: number;
+  /**
+   * Retry policy for provider call failures. If omitted, the provider is
+   * called at most once per turn (no retries). Pass DEFAULT_RETRY_POLICY
+   * for a reasonable starting point (3 attempts, exponential+jitter backoff).
+   */
+  retryPolicy?: RetryPolicy;
 }
 
 export interface AgentLoopResult {
@@ -16,13 +28,14 @@ export interface AgentLoopResult {
 
 const EXIT_OK = 0;
 const EXIT_CANCELLED = 130; // SIGINT convention
+const EXIT_ERROR = 1;
 
 export class AgentLoop {
   constructor(
     private provider: Provider,
     private toolRuntime: ToolRuntime,
     private journal: JsonlJournal,
-    private options: AgentLoopOptions = { maxTurns: 10 }
+    private options: AgentLoopOptions = { maxTurns: 10 },
   ) {}
 
   async run(runId: string, userMessage: string): Promise<AgentLoopResult> {
@@ -47,12 +60,17 @@ export class AgentLoop {
         cancelReason = "external";
         controller.abort();
       } else {
-        externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+        externalSignal.addEventListener("abort", onExternalAbort, {
+          once: true,
+        });
       }
     }
 
     let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
-    if (this.options.maxDurationMs !== undefined && !controller.signal.aborted) {
+    if (
+      this.options.maxDurationMs !== undefined &&
+      !controller.signal.aborted
+    ) {
       timeoutHandle = setTimeout(() => {
         cancelReason = "timeout";
         controller.abort();
@@ -70,6 +88,9 @@ export class AgentLoop {
     };
 
     const isAborted = () => controller.signal.aborted;
+
+    const retryPolicy = this.options.retryPolicy;
+    const maxAttempts = retryPolicy ? retryPolicy.maxAttempts : 1;
 
     await this.journal.append({
       type: "run:start",
@@ -102,7 +123,11 @@ export class AgentLoop {
     let cancelled: { reason: "external" | "timeout" } | undefined;
 
     try {
-      for (let turnIndex = 0; turnIndex < this.options.maxTurns; turnIndex++) {
+      for (
+        let turnIndex = 0;
+        turnIndex < this.options.maxTurns;
+        turnIndex++
+      ) {
         if (isAborted()) break;
 
         await this.journal.append({
@@ -112,35 +137,102 @@ export class AgentLoop {
           timestamp: Date.now(),
         });
 
-        let response: Awaited<ReturnType<Provider["send"]>>;
-        try {
-          response = await this.provider.send(
-            messages as Parameters<Provider["send"]>[0],
-            controller.signal
-          );
-        } catch (err) {
-          // Distinguish abort from genuine error — if our merged signal aborted,
-          // it's cancellation, regardless of how the provider expressed it.
+        // ── Provider call with retry ────────────────────────────────────
+        let response: Awaited<ReturnType<Provider["send"]>> | null = null;
+        let providerSucceeded = false;
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
           if (isAborted()) break;
-          const message = err instanceof Error ? err.message : String(err);
-          await this.journal.append({
-            type: "error",
-            runId,
-            message,
-            timestamp: Date.now(),
-          });
-          break;
+
+          try {
+            response = await this.provider.send(
+              messages as Parameters<Provider["send"]>[0],
+              controller.signal,
+            );
+            providerSucceeded = true;
+            break;
+          } catch (err) {
+            // Distinguish abort from genuine error.
+            if (isAborted()) break;
+
+            const agentError = classifyAgentError(err);
+
+            // Always emit an error event, now with classification.
+            await this.journal.append({
+              type: "error",
+              runId,
+              message: agentError.message,
+              errorType: agentError.type,
+              errorCategory: agentError.category,
+              timestamp: Date.now(),
+            });
+
+            // Check retry eligibility.
+            if (
+              retryPolicy &&
+              retryPolicy.shouldRetry(agentError) &&
+              attempt < maxAttempts
+            ) {
+              const delayMs = computeDelay(retryPolicy, attempt + 1);
+
+              await this.journal.append({
+                type: "retry",
+                runId,
+                turnIndex,
+                phase: "attempt",
+                attemptNumber: attempt + 1,
+                maxAttempts,
+                errorMessage: agentError.message,
+                delayMs,
+                timestamp: Date.now(),
+              });
+
+              // Abortable delay.
+              try {
+                await delayWithAbort(delayMs, controller.signal);
+              } catch {
+                // Aborted during backoff — break both loops.
+                break;
+              }
+              continue;
+            }
+
+            // Not retryable or max attempts exhausted.
+            // Only emit exhausted when retries were actually configured
+            // and we consumed all of them.
+            if (retryPolicy && attempt >= maxAttempts) {
+              await this.journal.append({
+                type: "retry",
+                runId,
+                turnIndex,
+                phase: "exhausted",
+                attemptNumber: attempt,
+                maxAttempts,
+                errorMessage: agentError.message,
+                delayMs: 0,
+                timestamp: Date.now(),
+              });
+              exitCode = EXIT_ERROR;
+            }
+
+            break;
+          }
         }
 
-        messages.push(response);
+        // If the provider call failed (after retries) or we were aborted,
+        // exit the turn loop.
+        if (!providerSucceeded || !response || isAborted()) break;
+
+        const res = response; // definite assignment for TS narrowing
+        messages.push(res);
 
         if (
-          response.role === "assistant" &&
-          response.toolCalls &&
-          response.toolCalls.length > 0
+          res.role === "assistant" &&
+          res.toolCalls &&
+          res.toolCalls.length > 0
         ) {
           let breakOuter = false;
-          for (const tc of response.toolCalls) {
+          for (const tc of res.toolCalls) {
             if (isAborted()) {
               breakOuter = true;
               break;
@@ -159,14 +251,17 @@ export class AgentLoop {
               output = await this.toolRuntime.execute(
                 tc.name,
                 tc.args,
-                controller.signal
+                controller.signal,
               );
             } catch (err) {
               if (isAborted()) {
                 breakOuter = true;
                 break;
               }
-              output = `Error: ${err instanceof Error ? err.message : String(err)}`;
+              output =
+                err instanceof Error
+                  ? `Error: ${err.message}`
+                  : `Error: ${String(err)}`;
             }
 
             await this.journal.append({
