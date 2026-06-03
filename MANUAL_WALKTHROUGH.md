@@ -388,3 +388,303 @@ node --inspect-brk packages/cli/dist/bin/run.js \
 的，所以 `packages/runtime/src/agent-loop.ts` 里的断点会在编译产物跑到
 对应行的时候命中。这条路能跑，但 repo 里没接 —— 真要加一份
 `.vscode/launch.json` 应该等我们对调试方案达成共识之后再单独开 PR。
+
+## PR06 — 错误分类与重试
+
+### 这个 PR 为 harness 加了什么
+
+一套 discriminated-union 错误分类（`AgentError = ProviderError | ToolError |
+HarnessError`），每种错误带 `retryable` 标记；新的 `retry` journal 事件记录
+每次重试尝试和耗尽；可配置的 `RetryPolicy`（指数退避 + jitter）；以及
+`ScriptedProvider` 支持注入 scripted error 来模拟不稳定的 provider。
+
+### 准备工作：跑 PR06 demo 的脚本
+
+PR06 的 retry 功能还没接到 CLI（CLI 只加了 `retryPolicy` 选项但 run.ts
+还没传进去），所以我们需要一个简短的 Node 脚本来构造带 `RetryPolicy`
+的 `AgentLoop` 并注入 scripted error。把下面这段保存为 `pr06-demo.mjs`
+放在仓库根目录：
+
+```bash
+cat > pr06-demo.mjs << 'SCRIPT'
+// PR06 Retry Demo — 保存到仓库根目录，从仓库根目录运行：
+//   node pr06-demo.mjs <scenario>
+// Scenarios: non-retryable | retry-success | retry-exhausted | cancel-backoff
+import { mkdtemp, readFile } from 'node:fs/promises';
+import { join, dirname } from 'node:path';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+
+const root = dirname(fileURLToPath(import.meta.url));
+const { JsonlJournal } = await import(join(root, 'packages/core/dist/index.js'));
+const { ScriptedProvider, AgentLoop, ToolRuntime, DEFAULT_RETRY_POLICY } =
+  await import(join(root, 'packages/runtime/dist/index.js'));
+
+const FAST = {
+  ...DEFAULT_RETRY_POLICY,
+  baseDelayMs: 10, maxDelayMs: 50, jitter: false,
+};
+const SLOW = { ...FAST, baseDelayMs: 5000, maxDelayMs: 10000 };
+
+const SCENARIOS = {
+  'non-retryable': {
+    responses: [
+      { _error: true, message: 'invalid API key', category: 'auth_failure' },
+      { role: 'assistant', content: 'never reached' },
+    ],
+    policy: FAST,
+  },
+  'retry-success': {
+    responses: [
+      { _error: true, message: 'rate limit exceeded', category: 'rate_limit' },
+      { role: 'assistant', content: 'recovered on retry!' },
+    ],
+    policy: FAST,
+  },
+  'retry-exhausted': {
+    responses: [
+      { _error: true, message: 'server error 500', category: 'server_error' },
+      { _error: true, message: 'server error 500', category: 'server_error' },
+      { _error: true, message: 'server error 500', category: 'server_error' },
+    ],
+    policy: FAST,
+  },
+  'cancel-backoff': {
+    responses: [
+      { _error: true, message: 'server error', category: 'server_error' },
+      { role: 'assistant', content: 'never reached' },
+    ],
+    policy: SLOW,
+    abortAfterMs: 30,
+  },
+};
+
+const name = process.argv[2];
+if (!name || !SCENARIOS[name]) {
+  console.error('Usage: node pr06-demo.mjs <scenario>');
+  console.error('Scenarios: ' + Object.keys(SCENARIOS).join(', '));
+  process.exit(1);
+}
+
+const s = SCENARIOS[name];
+const dir = await mkdtemp(join(tmpdir(), 'helm-pr06-'));
+const jp = join(dir, 'run.jsonl');
+const j = new JsonlJournal(jp);
+await j.open();
+
+const ac = s.abortAfterMs ? new AbortController() : undefined;
+const provider = new ScriptedProvider(s.responses);
+const tr = new ToolRuntime();
+const loop = new AgentLoop(provider, tr, j, {
+  maxTurns: 5,
+  retryPolicy: s.policy,
+  ...(ac ? { signal: ac.signal } : {}),
+});
+
+let result;
+if (ac && s.abortAfterMs) {
+  const promise = loop.run(name, 'test');
+  await new Promise((r) => setTimeout(r, s.abortAfterMs));
+  ac.abort();
+  result = await promise;
+} else {
+  result = await loop.run(name, 'test');
+}
+
+await j.close();
+const events = (await readFile(jp, 'utf-8'))
+  .trim().split('\n').map((l) => JSON.parse(l));
+
+console.log(
+  'exitCode=' + result.exitCode +
+  (result.cancelled ? ' cancelled=' + result.cancelled.reason : ''),
+);
+for (const e of events) {
+  let x = '';
+  if (e.type === 'error')
+    x = ' [' + (e.errorType || '?') + '/' + (e.errorCategory || '?') + '] ' +
+      JSON.stringify(e.message);
+  if (e.type === 'retry')
+    x = ' phase=' + e.phase + ' attempt=' + e.attemptNumber + '/' +
+      e.maxAttempts + ' delayMs=' + e.delayMs;
+  if (e.type === 'run:cancelled') x = ' reason=' + e.reason;
+  if (e.type === 'run:end') x = ' exitCode=' + e.exitCode;
+  console.log(e.type + x);
+}
+console.log('\nJournal → ' + jp);
+SCRIPT
+```
+
+每次 walkthrough 都是 `node pr06-demo.mjs <scenario>`，记下退避延迟和事件
+顺序的规律。
+
+### Walkthrough: 正常执行（无错误）
+
+PR06 不改变无错误路径的行为。用 CLI demo 验证：
+
+```bash
+node packages/cli/dist/bin/run.js \
+  packages/cli/fixtures/tools.json \
+  packages/cli/fixtures/script.jsonl \
+  packages/cli/fixtures/perms.json \
+  pr06-normal
+cat /tmp/helm-pr06-normal.jsonl
+```
+
+预期 trace（与 PR05 完全一致，没有 `error` 也没有 `retry`）：
+
+```
+run:start
+turn:start (turnIndex 0)
+tool:call  calculator({"expression":"2+3"})
+tool:result ["expression=2+3"]
+turn:start (turnIndex 1)
+run:end exitCode=0
+```
+
+**看什么：** 没有 `retryPolicy` 的时候，AgentLoop 每条 turn 最多调一次
+provider。不会出现 `retry` 事件。
+
+### Walkthrough: 不可重试错误
+
+```bash
+node pr06-demo.mjs non-retryable
+```
+
+trace：
+
+```
+run:start
+turn:start
+error [provider/auth_failure] "invalid API key"
+run:end exitCode=0
+```
+
+**看什么：** `error` 事件现在带 `errorType=provider` 和
+`errorCategory=auth_failure`。因为 `auth_failure` 的 `retryable` 是
+`false`，`shouldRetry()` 返回 false，agent 不重试直接终止当前 turn。
+trace 里**没有** `retry` 事件 —— 不可重试错误就是"跳过一次 retry 尝试
+都没有"。`exitCode=0`：只有 retry 耗尽才设 exitCode=1，非重试错误等同
+于 provider 给出了确定性的"不行"——类比 HTTP 401 不需要重试。
+
+> 也可以把 `auth_failure` 改成 `unknown`（同样不可重试），效果一样。
+> `providerError` helper 在 `packages/core/src/errors.ts` 里维护了每种
+> category → retryable 的映射表。
+
+### Walkthrough: 可重试错误 + 重试成功
+
+```bash
+node pr06-demo.mjs retry-success
+```
+
+trace：
+
+```
+run:start
+turn:start
+error [provider/rate_limit] "rate limit exceeded"
+retry phase=attempt attempt=2/3 delayMs=10
+run:end exitCode=0
+```
+
+**看什么：**
+
+1. `error` 事件 `errorCategory=rate_limit`，这条的 `retryable=true`。
+2. `retry phase=attempt` —— agent 判定错误可重试，决定等 `delayMs=10`
+   毫秒后发起第 2 次尝试（`attempt=2/3`）。因为 `baseDelayMs=10`、
+   `jitter=false`、第一次重试（retryIndex=0），延迟 = 10 × 2^0 = 10 ms。
+3. 重试成功 —— provider 的下一条响应是 `{ role: "assistant", content:
+   "recovered on retry!" }`，没有 toolCalls，所以 turn 结束，run 以
+   exitCode=0 收尾。
+
+注意 `turn:start` 只出现了一次 —— 重试发生在**同一个 turn 内部**，不是
+新开一个 turn。`ScriptedProvider` 的错误注入把 `_error` entry 消费掉之后，
+下一次 `send()` 自动前进到下一个正常 entry。
+
+### Walkthrough: 重试耗尽
+
+```bash
+node pr06-demo.mjs retry-exhausted
+```
+
+trace：
+
+```
+run:start
+turn:start
+error [provider/server_error] "server error 500"
+retry phase=attempt attempt=2/3 delayMs=10
+error [provider/server_error] "server error 500"
+retry phase=attempt attempt=3/3 delayMs=20
+error [provider/server_error] "server error 500"
+retry phase=exhausted attempt=3/3 delayMs=0
+run:end exitCode=1
+```
+
+**看什么：**
+
+- 3 条 `error` 事件 + 2 条 `retry phase=attempt` + 1 条 `retry
+  phase=exhausted`。
+- `delayMs` 的增长：第 2 次尝试 delayMs=10（10 × 2^0），第 3 次尝试
+  delayMs=20（10 × 2^1）——指数退避，每多一次重试延迟翻倍。因为
+  `jitter=false`，这里没有随机抖动。
+- `exhausted` 的 `delayMs=0`，表示"不会再等了"——这是 terminal event。
+- `exitCode=1`：retry 耗尽是唯一会把 exitCode 设为 1 的错误路径。对
+  比一下不可重试错误的 exitCode=0 —— harness 区分"provider 告诉我
+  不行"和"我试了几次都没成功"。
+
+### Walkthrough: 重试期间取消
+
+```bash
+node pr06-demo.mjs cancel-backoff
+```
+
+trace：
+
+```
+run:start
+turn:start
+error [provider/server_error] "server error"
+retry phase=attempt attempt=2/3 delayMs=5000
+run:cancelled reason=external
+run:end exitCode=130
+```
+
+**看什么：**
+
+- `delayMs=5000` 说明 agent 打算等 5 秒再重试。
+- 但 30 ms 后外部 `AbortController` 调了 `abort()`，退避 `setTimeout`
+  被 `delayWithAbort` 里注册的 abort listener `clearTimeout` 并 reject
+  掉。cancel **比下一次重试更优先**。
+- `run:cancelled reason=external` 出现后就不再尝试重试了。`exitCode=130`。
+- 如果用 `--timeout`（走内部超时），`reason` 会是 `timeout` 而不是
+  `external`——逻辑和 PR05 完全一样，只是 abort 发生在 backoff sleep
+  期间。
+
+### 试一下
+
+1. **观察 jitter 效果：** 把 `pr06-demo.mjs` 里的 `FAST` 定义改成
+   `jitter: true`，然后多跑几次 `retry-exhausted`。`delayMs` 每次都不一样
+   （范围在 [0, computedDelay] 内随机）。再改回 `jitter: false`，延迟
+   变成确定性的。
+2. **maxAttempts=1 的行为：** 把 `FAST` 的 `maxAttempts` 改成 `1`，跑
+   `retry-success`。agent 只试一次，`error` 事件后直接收尾 —— 没有
+   `retry` 事件也没有 `exhausted`。因为 `attempt < maxAttempts` 永远
+   不成立（attempt=1, maxAttempts=1）。
+3. **看 agent-loop 的 retry 循环：** `packages/runtime/src/agent-loop.ts`
+   中 `for (let attempt = 1; attempt <= maxAttempts; attempt++)` 这段
+   就是所有重试逻辑的入口 —— 对照 `packages/runtime/src/retry.ts` 里
+   的 `computeDelay` 和 `delayWithAbort` 理解 delayMs 怎么算出来、怎么
+   被 abort。
+
+### 更新后的附录 A — 事件类型速查
+
+PR06 新增和修改的事件：
+
+| 事件               | 引入的 PR     | 含义                                                            |
+| ------------------ | ------------- | --------------------------------------------------------------- |
+| `error`            | PR01 / PR06 改 | PR06 起增加了可选字段 `errorType`（`provider\|tool\|harness`）和 `errorCategory`（具体分类字符串），方便消费者按分类路由 |
+| `retry`            | PR06          | 重试生命周期：`phase=attempt` 表示即将发起第 N 次尝试（带 `delayMs` 退避延迟），`phase=exhausted` 表示所有尝试都失败了（`delayMs=0`） |
+
+原有的 `error` 事件仍然向后兼容 —— 不带 `errorType`/`errorCategory` 的旧
+event 依然合法。
