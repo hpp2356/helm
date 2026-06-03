@@ -23,4 +23,36 @@ describe("ScriptedProvider", () => {
     const p = new ScriptedProvider([]);
     expect(typeof p.send).toBe("function");
   });
+
+  it("throws HelmError on error entry", async () => {
+    const p = new ScriptedProvider([
+      {
+        _error: true,
+        message: "rate limit hit",
+        category: "rate_limit",
+      },
+      { role: "assistant", content: "next" },
+    ]);
+    await expect(
+      p.send([{ role: "user", content: "hi" }]),
+    ).rejects.toMatchObject({
+      name: "HelmError",
+      message: "rate limit hit",
+    });
+    // Next call returns the success entry (index advanced past error).
+    const r = await p.send([{ role: "user", content: "hi" }]);
+    expect(r).toEqual({ role: "assistant", content: "next" });
+  });
+
+  it("stacks multiple error entries for consecutive failures", async () => {
+    const p = new ScriptedProvider([
+      { _error: true, message: "fail 1", category: "server_error" },
+      { _error: true, message: "fail 2", category: "server_error" },
+      { role: "assistant", content: "success" },
+    ]);
+    await expect(p.send([])).rejects.toMatchObject({ message: "fail 1" });
+    await expect(p.send([])).rejects.toMatchObject({ message: "fail 2" });
+    const r = await p.send([]);
+    expect(r).toEqual({ role: "assistant", content: "success" });
+  });
 });

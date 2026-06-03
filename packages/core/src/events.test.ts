@@ -116,6 +116,46 @@ describe("eventToString", () => {
     expect(parsed.stack).toBeUndefined();
   });
 
+  it("should serialize retry attempt event", () => {
+    const event: RunEvent = {
+      type: "retry",
+      runId: "run-1",
+      turnIndex: 0,
+      phase: "attempt",
+      attemptNumber: 2,
+      maxAttempts: 3,
+      errorMessage: "rate limit exceeded",
+      delayMs: 2000,
+      timestamp: 1717200002000,
+    };
+    const result = eventToString(event);
+    const parsed = JSON.parse(result);
+    expect(parsed.type).toBe("retry");
+    expect(parsed.phase).toBe("attempt");
+    expect(parsed.attemptNumber).toBe(2);
+    expect(parsed.maxAttempts).toBe(3);
+    expect(parsed.errorMessage).toBe("rate limit exceeded");
+    expect(parsed.delayMs).toBe(2000);
+  });
+
+  it("should serialize retry exhausted event", () => {
+    const event: RunEvent = {
+      type: "retry",
+      runId: "run-1",
+      turnIndex: 0,
+      phase: "exhausted",
+      attemptNumber: 3,
+      maxAttempts: 3,
+      errorMessage: "server error",
+      delayMs: 0,
+      timestamp: 1717200003000,
+    };
+    const result = eventToString(event);
+    const parsed = JSON.parse(result);
+    expect(parsed.type).toBe("retry");
+    expect(parsed.phase).toBe("exhausted");
+  });
+
   it("should produce valid JSON with no line breaks in the output", () => {
     const event: RunEvent = {
       type: "run:start",

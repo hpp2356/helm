@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { ScriptedProvider } from "./scripted-provider.js";
-import { AgentLoop } from "./agent-loop.js";
+import { AgentLoop, type AgentLoopOptions } from "./agent-loop.js";
 import { ToolRuntime } from "./tool-runtime.js";
+import { type RetryPolicy, DEFAULT_RETRY_POLICY } from "./retry.js";
 import { JsonlJournal } from "@helm/core";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -301,6 +302,204 @@ describe("AgentLoop", () => {
       .split("\n")
       .map((l) => JSON.parse(l));
     expect(events.some((e) => e.type === "run:cancelled")).toBe(false);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  // ── PR06: Retry tests ───────────────────────────────────────────────
+
+  it("retries on retryable error and succeeds on second attempt", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "helm-test-"));
+    const journalPath = join(dir, "run.jsonl");
+    const journal = new JsonlJournal(journalPath);
+    await journal.open();
+
+    // First call throws rate_limit, second call returns success.
+    const provider = new ScriptedProvider([
+      { _error: true, message: "rate limit", category: "rate_limit" },
+      { role: "assistant", content: "recovered!" },
+    ]);
+
+    const fastPolicy: RetryPolicy = {
+      ...DEFAULT_RETRY_POLICY,
+      baseDelayMs: 1,
+      maxDelayMs: 10,
+      jitter: false,
+    };
+
+    const toolRuntime = new ToolRuntime();
+    const loop = new AgentLoop(provider, toolRuntime, journal, {
+      maxTurns: 5,
+      retryPolicy: fastPolicy,
+    });
+    const result = await loop.run("test-retry-success", "go");
+    await journal.close();
+
+    expect(result.exitCode).toBe(0);
+
+    const events = (await readFile(journalPath, "utf-8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+
+    const errorEvents = events.filter((e) => e.type === "error");
+    expect(errorEvents.length).toBe(1);
+    expect(errorEvents[0].errorType).toBe("provider");
+    expect(errorEvents[0].errorCategory).toBe("rate_limit");
+
+    const retryEvents = events.filter((e) => e.type === "retry");
+    expect(retryEvents.length).toBe(1);
+    expect(retryEvents[0]).toMatchObject({
+      phase: "attempt",
+      attemptNumber: 2,
+      maxAttempts: 3,
+    });
+
+    expect(events.some((e) => e.type === "run:end" && e.exitCode === 0)).toBe(
+      true,
+    );
+    expect(events.some((e) => e.type === "retry" && (e as {phase: string}).phase === "exhausted")).toBe(
+      false,
+    );
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("does not retry on non-retryable error", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "helm-test-"));
+    const journalPath = join(dir, "run.jsonl");
+    const journal = new JsonlJournal(journalPath);
+    await journal.open();
+
+    const provider = new ScriptedProvider([
+      { _error: true, message: "bad key", category: "auth_failure" },
+      { role: "assistant", content: "never reached" },
+    ]);
+
+    const toolRuntime = new ToolRuntime();
+    const loop = new AgentLoop(provider, toolRuntime, journal, {
+      maxTurns: 5,
+      retryPolicy: DEFAULT_RETRY_POLICY,
+    });
+    const result = await loop.run("test-no-retry", "go");
+    await journal.close();
+
+    const events = (await readFile(journalPath, "utf-8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+
+    expect(result.exitCode).toBe(0); // non-retryable = no exhaustion
+    const errorEvents = events.filter((e) => e.type === "error");
+    expect(errorEvents.length).toBe(1);
+    expect(errorEvents[0].errorCategory).toBe("auth_failure");
+
+    // No retry events at all.
+    expect(events.filter((e) => e.type === "retry").length).toBe(0);
+
+    // The second message should never have been consumed.
+    // Provider index only advanced past the error entry.
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("emits retry exhausted when all attempts fail", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "helm-test-"));
+    const journalPath = join(dir, "run.jsonl");
+    const journal = new JsonlJournal(journalPath);
+    await journal.open();
+
+    // Three retryable errors in a row — exhausts maxAttempts=3.
+    const provider = new ScriptedProvider([
+      { _error: true, message: "fail 1", category: "server_error" },
+      { _error: true, message: "fail 2", category: "server_error" },
+      { _error: true, message: "fail 3", category: "server_error" },
+    ]);
+
+    const fastPolicy: RetryPolicy = {
+      ...DEFAULT_RETRY_POLICY,
+      baseDelayMs: 1,
+      maxDelayMs: 10,
+      jitter: false,
+    };
+
+    const toolRuntime = new ToolRuntime();
+    const loop = new AgentLoop(provider, toolRuntime, journal, {
+      maxTurns: 5,
+      retryPolicy: fastPolicy,
+    });
+    const result = await loop.run("test-exhausted", "go");
+    await journal.close();
+
+    expect(result.exitCode).toBe(1); // EXIT_ERROR
+
+    const events = (await readFile(journalPath, "utf-8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+
+    const errorEvents = events.filter((e) => e.type === "error");
+    expect(errorEvents.length).toBe(3);
+
+    const retryEvents = events.filter(
+      (e: {type: string}) => e.type === "retry",
+    );
+    // 2 attempts + 1 exhausted = 3 retry events
+    expect(retryEvents.length).toBe(3);
+    expect(retryEvents[0].phase).toBe("attempt");
+    expect(retryEvents[1].phase).toBe("attempt");
+    expect(retryEvents[2].phase).toBe("exhausted");
+    expect(retryEvents[2].attemptNumber).toBe(3);
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("aborts retry delay when signal fires", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "helm-test-"));
+    const journalPath = join(dir, "run.jsonl");
+    const journal = new JsonlJournal(journalPath);
+    await journal.open();
+
+    const ac = new AbortController();
+
+    const provider = new ScriptedProvider([
+      { _error: true, message: "fail 1", category: "server_error" },
+      { role: "assistant", content: "never reached" },
+    ]);
+
+    const slowPolicy: RetryPolicy = {
+      maxAttempts: 3,
+      baseDelayMs: 5000,
+      maxDelayMs: 30_000,
+      backoffMultiplier: 2,
+      jitter: false,
+      shouldRetry(e) {
+        return e.retryable;
+      },
+    };
+
+    const toolRuntime = new ToolRuntime();
+    const loop = new AgentLoop(provider, toolRuntime, journal, {
+      maxTurns: 5,
+      signal: ac.signal,
+      retryPolicy: slowPolicy,
+    });
+
+    // Abort after the first error is emitted but while waiting in backoff.
+    const runPromise = loop.run("test-abort-delay", "go");
+    await new Promise((r) => setTimeout(r, 20));
+    ac.abort();
+    const result = await runPromise;
+    await journal.close();
+
+    expect(result.exitCode).toBe(130);
+    expect(result.cancelled?.reason).toBe("external");
+
+    const events = (await readFile(journalPath, "utf-8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    // Should see one error and a retry attempt that got aborted, then cancelled.
+    expect(events.some((e) => e.type === "error")).toBe(true);
+    expect(events.some((e) => e.type === "retry")).toBe(true);
+    expect(events.some((e) => e.type === "run:cancelled")).toBe(true);
     await rm(dir, { recursive: true, force: true });
   });
 

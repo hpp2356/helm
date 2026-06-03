@@ -24,12 +24,26 @@ export type RunEvent =
       runId: string;
       message: string;
       stack?: string;
+      /** Error classification — omitted for legacy unclassified errors. */
+      errorType?: "provider" | "tool" | "harness";
+      errorCategory?: string;
       timestamp: number;
     }
   | {
       type: "run:cancelled";
       runId: string;
       reason: "external" | "timeout";
+      timestamp: number;
+    }
+  | {
+      type: "retry";
+      runId: string;
+      turnIndex: number;
+      phase: "attempt" | "exhausted";
+      attemptNumber: number;
+      maxAttempts: number;
+      errorMessage: string;
+      delayMs: number;
       timestamp: number;
     };
 
