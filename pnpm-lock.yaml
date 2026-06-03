@@ -38,7 +38,11 @@ importers:
         specifier: workspace:*
         version: link:../runtime
 
-  packages/replay: {}
+  packages/replay:
+    dependencies:
+      '@helm/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/runtime:
     dependencies:
