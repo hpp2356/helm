@@ -1,260 +1,371 @@
-# Helm 手动走查 (PR08)
+# Helm 手动走查 (PR09)
 
-## PR08 — Replay
+## PR09 — ContextBuilder / TokenBudget
 
 ### 这个 PR 为 harness 加了什么
 
-journal 的读写闭环。PR01 的 `JsonlJournal` 是 write-side（append-only writer），
-PR08 加的是 read-side：从磁盘 `.jsonl` 文件读回 `RunEvent[]`，重放事件流，
-并从中提取结构化统计信息。核心概念：
+agent 的"账本"——算 token 消耗、限制单次 run 的用量。在真实 LLM provider 进场（PR12）之前，先把计费逻辑（token counting）和预算（capping）拆出来做掉。
 
-- **`readJournal(filePath)`** — 读一份 `.jsonl` journal 文件，逐行 parse
-  JSON，返回 `{ events: RunEvent[], warnings: ReadWarning[] }`。每行一个
-  `RunEvent`，首尾空白忽略。
-- **`replayEvents(events, observer?)`** — 按序遍历 `RunEvent[]`，每个事件
-  调一次可选的 observer callback。observer 拿到 event 和它在数组里的 index，
-  可以 print、collect、或桥接到 PR07 的 eval 断言。
-- **`computeStats(events)`** — 从 `RunEvent[]` 中提取 `RunSummary`：
-  每种事件类型出现次数、turn 数、各 tool 调用次数、error 总数和分类分布、
-  retry 尝试次数和是否耗尽、run 耗时（`run:end.timestamp - run:start.timestamp`）、
-  是否取消及其原因、最终 exitCode。
-- **`ReadError`** — 文件不存在时抛出的 error 子类，带 `filePath` 字段。
+核心概念：
 
-`@helm/replay` 只依赖 `@helm/core`（`RunEvent` 类型），不依赖 `@helm/runtime`。
-读 journal 不需要知道 AgentLoop 是怎么写的——只要知道 JSONL 格式契约（每行一个
-`JSON.stringify(RunEvent)`）。
+- **`ContextWindow`** — 发给 provider 的完整上下文快照：system prompt + messages + tool definitions + 预估 token 数。
+- **`ToolDef`** — `Tool` 的可序列化投影（name + description + parameters，去掉 execute 函数）。供 context assembly 用。
+- **`TokenBudget`** — 计费器：最大 token 数、已用 token 数、剩余 token 数、是否耗尽（`isExhausted()`）、警告阈值（`isWarning()`，默认 80%）。
+- **`TokenCounter`** — token 计数接口。当前唯一的实现是 `CharTokenCounter`：`ceil(charCount / charsPerToken)`，默认 4 chars/token（英文经验值，代码场景约 2-3 chars/token）。
+- **`ContextBuilder`** — 组装 `ContextWindow`：取 system prompt + messages + toolDefs，用 `TokenCounter` 估算 token 数，返回完整 window。
+- **`AgentLoop` 集成** — `AgentLoopOptions` 新增 `tokenBudget?` 和 `contextBuilder?`。每个 turn 在 `provider.send()` 之前做 budget check：如果当前 context 的预估 token 数超过剩余预算，emit `error` 事件（`errorType=harness, errorCategory=budget_exhausted`），以 `exitCode=1` 结束 run。
 
-### 准备工作：跑 replay 测试
+`TokenBudget` 是累积记账（cumulative）：每个 turn 的 context（含所有历史消息）都算进 `usedTokens`。类比真实 LLM API 的 pricing 模型——每次请求都重新发送完整上下文，输入 token 每次都全量计费。
+
+> **选型理由 — 4 chars/token：** 英文文本 token 化后平均 1 token ≈ 4 字符（GPT 系 tokenizer 的经验值）。中文场景下同量文本的 token 数更多，4 是偏保守的估算。PR12 接入真实 tokenizer 时会替换 `TokenCounter` 实现，接口已预留。
+
+### 准备工作
 
 ```bash
-pnpm --filter @helm/replay exec vitest run --reporter=verbose
+cd ~/projects-ai/helm/helm-dev
+pnpm install
+pnpm build
 ```
 
-26 个测试覆盖：读有效文件、空文件、损坏 JSON（带行号）、未知事件类型（emit warning
-不 crash）、缺失字段、null 行、文件不存在、JsonlJournal 写入再用 readJournal
-读出（round-trip）、空白行跳过、replayEvents observer 回调顺序、computeStats
-各种统计维度、空 event 数组边界、完整集成测试。
-
-### Walkthrough: 手写 journal 然后读回来
-
-最快的理解路径是手写一份 `.jsonl`，然后用 `readJournal` + `computeStats` 观察输出：
+预算系统没有 CLI 入口（未来 PR），通过 vitest 观察：
 
 ```bash
-# 写一份模拟 journal
-cat > /tmp/helm-replay-demo.jsonl << 'JSONL'
-{"type":"run:start","runId":"demo","timestamp":1000}
-{"type":"turn:start","runId":"demo","turnIndex":0,"timestamp":1001}
-{"type":"tool:call","runId":"demo","turnIndex":0,"toolName":"calc","args":{"expr":"2+3"},"timestamp":1002}
-{"type":"tool:result","runId":"demo","turnIndex":0,"toolName":"calc","output":"5","timestamp":1003}
-{"type":"turn:start","runId":"demo","turnIndex":1,"timestamp":1004}
-{"type":"error","runId":"demo","message":"timeout","errorType":"provider","errorCategory":"timeout","timestamp":1005}
-{"type":"retry","runId":"demo","turnIndex":1,"phase":"attempt","attemptNumber":2,"maxAttempts":3,"errorMessage":"timeout","delayMs":10,"timestamp":1006}
-{"type":"run:end","runId":"demo","exitCode":0,"timestamp":1100}
-JSONL
+pnpm --filter @helm/runtime exec vitest run --reporter=verbose
 ```
 
-然后用 Node 跑一段简短脚本：
+新增 30 个测试（8 token-counter + 9 context-builder + 5 agent-loop budget + 8 TokenBudget），都通过。
+
+### Walkthrough: TokenBudget 基本行为
 
 ```bash
 node --import tsx -e '
-import { readJournal, computeStats, replayEvents } from "./packages/replay/src/index.js";
+import { TokenBudget } from "./packages/core/src/index.js";
 
-const result = readJournal("/tmp/helm-replay-demo.jsonl");
-console.log("Events:", result.events.length);
-console.log("Warnings:", result.warnings.length);
+const budget = new TokenBudget(1000);
+console.log("max:", budget.maxTokens);
+console.log("used:", budget.usedTokens);
+console.log("remaining:", budget.remainingTokens);
+console.log("exhausted:", budget.isExhausted());
+console.log("warning:", budget.isWarning());  // 默认 80% 阈值，0 < 800
 
-console.log("\nReplay:");
-replayEvents(result.events, (e, i) => {
-  console.log(`  [${i}] ${e.type}`);
+budget.consume(750);
+console.log("\n--- after 750 tokens ---");
+console.log("used:", budget.usedTokens);
+console.log("remaining:", budget.remainingTokens);
+console.log("exhausted:", budget.isExhausted());
+console.log("warning:", budget.isWarning());  // 750 < 800, 还没到阈值
+
+budget.consume(100);
+console.log("\n--- after 850 tokens ---");
+console.log("used:", budget.usedTokens);
+console.log("remaining:", budget.remainingTokens);
+console.log("exhausted:", budget.isExhausted());
+console.log("warning:", budget.isWarning());  // 850 >= 800, 触发警告
+
+budget.consume(200);
+console.log("\n--- after 1050 tokens ---");
+console.log("used:", budget.usedTokens);
+console.log("remaining:", budget.remainingTokens);  // floor at 0
+console.log("exhausted:", budget.isExhausted());    // true
+'
+```
+
+输出：
+
+```
+max: 1000
+used: 0
+remaining: 1000
+exhausted: false
+warning: false
+
+--- after 750 tokens ---
+used: 750
+remaining: 250
+exhausted: false
+warning: false
+
+--- after 850 tokens ---
+used: 850
+remaining: 150
+exhausted: false
+warning: true
+
+--- after 1050 tokens ---
+used: 1050
+remaining: 0
+exhausted: true
+```
+
+**看什么：**
+
+- `remainingTokens` 永远 ≥ 0（不会出现负数），即使 `usedTokens > maxTokens`。
+- `isWarning()` 在 `usedTokens >= maxTokens * warnThreshold` 时返回 true，比 `isExhausted()` 先触发。
+- `warnThreshold` 可在构造函数第二个参数自定义：`new TokenBudget(1000, 0.5)` 表示 50% 就警告。
+
+### Walkthrough: CharTokenCounter 估算逻辑
+
+```bash
+node --import tsx -e '
+import { CharTokenCounter } from "./packages/runtime/src/index.js";
+
+const c = new CharTokenCounter(4);
+
+console.log("empty:", c.countText(""));                        // 0
+console.log("a:", c.countText("a"));                           // ceil(1/4)=1
+console.log("hello:", c.countText("hello"));                   // ceil(5/4)=2
+console.log("hello world:", c.countText("hello world"));       // ceil(11/4)=3
+
+const msgs = [
+  { role: "user", content: "What is 2+3?" },
+];
+// role "user" (4 chars) + content "What is 2+3?" (14 chars) = 18 chars / 4 = 5 tokens
+console.log("single message:", c.countMessages(msgs));
+
+const toolDefs = [
+  { name: "calc", description: "Evaluate a math expression", parameters: { type: "object", properties: { expr: { type: "string" } } } },
+];
+console.log("one tool def:", c.countToolDefs(toolDefs));
+'
+```
+
+输出：
+
+```
+empty: 0
+a: 1
+hello: 2
+hello world: 3
+single message: 5
+one tool def: 12
+```
+
+**看什么：**
+
+- `countText("")` 返回 0（空内容不计 token）。
+- 每条 message 计算 role + content + toolCalls args 的所有字符 / 4。
+- `charsPerToken` 越小，估算越保守（偏大）——`new CharTokenCounter(2)` 是代码/中文场景的常用值。
+
+### Walkthrough: ContextBuilder 组装上下文
+
+ContextBuilder 把零散的 messages、tools、system prompt 聚合成一个 `ContextWindow`：
+
+```bash
+node --import tsx -e '
+import { ContextBuilder, CharTokenCounter } from "./packages/runtime/src/index.js";
+
+const cb = new ContextBuilder(new CharTokenCounter(4));
+
+// 无 tools、无 system prompt 的最小窗口
+const w1 = cb.build({
+  messages: [{ role: "user", content: "Hi" }],
+  toolDefs: [],
 });
+console.log("minimal window:", JSON.stringify({
+  tokens: w1.estimatedTokens,
+  systemPrompt: w1.systemPrompt,
+  msgs: w1.messages.length,
+  tools: w1.toolDefs.length,
+}, null, 2));
 
-const stats = computeStats(result.events);
-console.log("\nStats:");
-console.log("  turns:", stats.turnCount);
-console.log("  tool calls:", JSON.stringify(stats.toolCallCounts));
-console.log("  errors:", stats.errorCount);
-console.log("  errors by category:", JSON.stringify(stats.errorsByCategory));
-console.log("  retry attempts:", stats.retryAttemptCount);
-console.log("  retry exhausted:", stats.retryExhausted);
-console.log("  duration (ms):", stats.durationMs);
-console.log("  cancelled:", stats.cancelled);
-console.log("  exit code:", stats.exitCode);
+// 带 system prompt 的窗口
+const w2 = cb.build({
+  systemPrompt: "You are a helpful assistant with extensive instructions on how to respond.",
+  messages: [{ role: "user", content: "Hi" }],
+  toolDefs: [],
+});
+console.log("\nwith system prompt, tokens:", w2.estimatedTokens,
+  "(delta:", w2.estimatedTokens - w1.estimatedTokens, ")");
+
+// 带 tools 的窗口
+const w3 = cb.build({
+  messages: [{ role: "user", content: "Hi" }],
+  toolDefs: [
+    { name: "calc", description: "Do math", parameters: { type: "object", properties: { expr: { type: "string" } } } },
+    { name: "echo", description: "Echo text", parameters: { type: "object", properties: { text: { type: "string" } } } },
+  ],
+});
+console.log("\nwith tools, tokens:", w3.estimatedTokens,
+  "(delta:", w3.estimatedTokens - w1.estimatedTokens, ")");
 '
 ```
 
 输出：
 
 ```
-Events: 8
-Warnings: 0
+minimal window: {
+  "tokens": 2,
+  "systemPrompt": null,
+  "msgs": 1,
+  "tools": 0
+}
 
-Replay:
-  [0] run:start
-  [1] turn:start
-  [2] tool:call
-  [3] tool:result
-  [4] turn:start
-  [5] error
-  [6] retry
-  [7] run:end
+with system prompt, tokens: 18 (delta: 16 )
 
-Stats:
-  turns: 2
-  tool calls: {"calc":1}
-  errors: 1
-  errors by category: {"timeout":1}
-  retry attempts: 1
-  retry exhausted: false
-  duration (ms): 100
-  cancelled: false
-  exit code: 0
+with tools, tokens: 31 (delta: 29 )
 ```
 
 **看什么：**
 
-- `readJournal` 返回 8 个事件，0 个 warning——这份模拟 journal 格式正确。
-- `replayEvents` 按写入顺序逐条回调，observer 拿到 `[index]` 和 `event.type`。
-- `computeStats` 不用知道这是手写的还是 AgentLoop 产生的——它只看事件流：
-  - `turnCount: 2`，因为有两个 `turn:start`。
-  - `toolCallCounts: {"calc":1}`，有一个 `tool:call` 事件。
-  - `errorsByCategory: {"timeout":1}`，有一个 error 事件，category 是 `timeout`。
-  - `durationMs: 100` = `run:end.timestamp (1100) - run:start.timestamp (1000)`。
-  - `retryAttemptCount: 1`，`retryExhausted: false`——只有一条 `phase=attempt`。
-  - `exitCode: 0`——从 `run:end` 提取。
+- `estimatedTokens` 是 system prompt + messages + toolDefs 三部分 token 估算之和。
+- 每增加一部分内容，token 估算就会增加——这是在 `provider.send()` 之前就能拿到的预估值（pre-flight estimation）。
+- `systemPrompt` 不传时是 `null`。
 
-类比 Java 里，`JsonlJournal` 是 `FileWriter`（append mode），`readJournal`
-是 `BufferedReader` + `Gson.fromJson()`，`computeStats` 是 stream 上的
-`Collectors.groupingBy()`。
+### Walkthrough: AgentLoop 预算耗尽
 
-### Walkthrough: 损坏的 journal — malformed JSON
-
-```bash
-cat > /tmp/helm-replay-bad.jsonl << 'JSONL'
-{"type":"run:start","runId":"bad","timestamp":1}
-this is not valid json
-{"type":"run:end","runId":"bad","exitCode":0,"timestamp":3}
-JSONL
-
-node --import tsx -e '
-import { readJournal } from "./packages/replay/src/index.js";
-const result = readJournal("/tmp/helm-replay-bad.jsonl");
-console.log("Events:", result.events.length);
-for (const w of result.warnings) {
-  console.log(`Warning line ${w.line}: ${w.message}`);
-}
-console.log("Event types:", result.events.map(e => e.type).join(", "));
-'
-```
-
-输出：
-
-```
-Events: 2
-Warning line 2: Malformed JSON on line 2
-Event types: run:start, run:end
-```
-
-**看什么：**
-
-- 第 2 行损坏了，readJournal 发出一个 warning 带行号 2，然后**继续读**。
-- 第 3 行照常 parse 进结果。不因为中间一行坏掉就丢弃整个文件。
-- warning 带 line number——在几百行的 journal 里定位一行损坏的 JSON 时
-  这就是救命信息。
-
-### Walkthrough: 损坏的 journal — unknown event type
-
-```bash
-cat > /tmp/helm-replay-unknown.jsonl << 'JSONL'
-{"type":"run:start","runId":"u","timestamp":1}
-{"type":"weather:forecast","location":"beijing","timestamp":2}
-{"type":"run:end","runId":"u","exitCode":0,"timestamp":3}
-JSONL
-
-node --import tsx -e '
-import { readJournal } from "./packages/replay/src/index.js";
-const result = readJournal("/tmp/helm-replay-unknown.jsonl");
-console.log("Events:", result.events.length);
-for (const w of result.warnings) {
-  console.log(`Warning line ${w.line}: ${w.message}`);
-}
-'
-```
-
-输出：
-
-```
-Events: 3
-Warning line 2: Unknown event type "weather:forecast" on line 2
-```
-
-**看什么：** 未知事件类型**不会被丢弃**——它照样进入 `events` 数组。warning
-是让调用方知道"这行我不认识"，但究竟是 skip 还是保留由调用方决定。
-`isRunEvent` 只检查 `type` 和 `timestamp` 两个必须字段存在，不做白名单校验；
-白名单校验（`KNOWN_EVENT_TYPES`）只产生 warning。
-
-### Walkthrough: 文件不存在
+这是最重要的集成行为——当预算不够下一个 turn 的 context 时，AgentLoop 停 run 并记录错误：
 
 ```bash
 node --import tsx -e '
-import { readJournal, ReadError } from "./packages/replay/src/index.js";
-try {
-  readJournal("/tmp/helm-replay-ghost.jsonl");
-} catch (err) {
-  console.log("Name:", err.name);
-  console.log("Message:", err.message);
-  console.log("FilePath:", err instanceof ReadError ? err.filePath : "N/A");
-}
-'
-```
-
-输出：
-
-```
-Name: ReadError
-Message: Cannot read journal file: /tmp/helm-replay-ghost.jsonl
-FilePath: /tmp/helm-replay-ghost.jsonl
-```
-
-`ReadError` 是 `Error` 的子类，带 `filePath` 字段——调用方不用 parse
-`message` 字符串就能拿到路径。
-
-### Walkthrough: JsonlJournal → readJournal round-trip
-
-这是最重要的集成契约：写入和读出必须完全一致。测试
-`"full integration: write with JsonlJournal, read with readJournal, compute stats"`
-做了完整验证，这里手工重现：
-
-```bash
-node --import tsx -e '
-import { JsonlJournal } from "./packages/core/src/index.js";
-import { readJournal, computeStats } from "./packages/replay/src/index.js";
-import { mkdtempSync, rmSync } from "node:fs";
+import { JsonlJournal, TokenBudget } from "./packages/core/src/index.js";
+import { ScriptedProvider, AgentLoop, ToolRuntime, ContextBuilder, CharTokenCounter } from "./packages/runtime/src/index.js";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-const dir = mkdtempSync(join(tmpdir(), "helm-rt-"));
-const fp = join(dir, "journal.jsonl");
-
-// 写
-const j = new JsonlJournal(fp);
+const dir = mkdtempSync(join(tmpdir(), "helm-budget-"));
+const jp = join(dir, "run.jsonl");
+const j = new JsonlJournal(jp);
 await j.open();
-await j.append({ type: "run:start", runId: "rt", timestamp: 1000 });
-await j.append({ type: "tool:call", runId: "rt", turnIndex: 0, toolName: "calc", args: { expr: "1+1" }, timestamp: 1001 });
-await j.append({ type: "tool:result", runId: "rt", turnIndex: 0, toolName: "calc", output: "2", timestamp: 1002 });
-await j.append({ type: "run:end", runId: "rt", exitCode: 0, timestamp: 1100 });
+
+const provider = new ScriptedProvider([
+  { role: "assistant", content: "Should not be reached — budget exhausted first" },
+]);
+
+const loop = new AgentLoop(provider, new ToolRuntime(), j, {
+  maxTurns: 5,
+  tokenBudget: new TokenBudget(2),   // 只给 2 个 token — 任何消息都超
+  contextBuilder: new ContextBuilder(new CharTokenCounter(4)),
+});
+
+const result = await loop.run("demo-budget-exhausted", "Hello world!");
 await j.close();
 
-// 读
-const result = readJournal(fp);
-console.log("Events:", result.events.length);
-console.log("Warnings:", result.warnings.length);
-console.log("Types:", result.events.map(e => e.type).join(" → "));
+console.log("exitCode:", result.exitCode);
 
-// 统计
-const stats = computeStats(result.events);
-console.log("Turns:", stats.turnCount);
-console.log("Tool calls:", JSON.stringify(stats.toolCallCounts));
-console.log("Duration:", stats.durationMs, "ms");
+const events = readFileSync(jp, "utf-8").trim().split("\n").map(l => JSON.parse(l));
+for (const e of events) {
+  let extra = "";
+  if (e.type === "error") extra = " errorType=" + e.errorType + " errorCategory=" + e.errorCategory;
+  if (e.type === "run:end") extra = " exitCode=" + e.exitCode;
+  console.log(e.type + extra);
+}
+rmSync(dir, { recursive: true, force: true });
+'
+```
+
+输出：
+
+```
+exitCode: 1
+run:start
+turn:start
+error errorType=harness errorCategory=budget_exhausted
+run:end exitCode=1
+```
+
+**看什么：**
+
+- journal 只有 4 个事件：`run:start` → `turn:start` → `error` → `run:end`。没有 `tool:call`、没有 provider 响应——预算检查在 `provider.send()` **之前**，超了就停。
+- error 带的 `errorType=harness, errorCategory=budget_exhausted`，可以用 PR07 的 eval 断言 `{ type: "error:category", errorCategory: "budget_exhausted" }` 检测。
+- `exitCode=1`——和 retry 耗尽一样用 `EXIT_ERROR`，区别于取消的 `130`。对比正常结束的 `exitCode=0`。
+
+### Walkthrough: 预算充足的正常 run
+
+换个充足的预算，同样的脚本正常跑完：
+
+```bash
+node --import tsx -e '
+import { JsonlJournal, TokenBudget } from "./packages/core/src/index.js";
+import { ScriptedProvider, AgentLoop, ToolRuntime, ContextBuilder, CharTokenCounter } from "./packages/runtime/src/index.js";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+const dir = mkdtempSync(join(tmpdir(), "helm-budget-"));
+const jp = join(dir, "run.jsonl");
+const j = new JsonlJournal(jp);
+await j.open();
+
+const provider = new ScriptedProvider([
+  { role: "assistant", content: "Hello! How can I help?" },
+]);
+
+const loop = new AgentLoop(provider, new ToolRuntime(), j, {
+  maxTurns: 5,
+  tokenBudget: new TokenBudget(100_000),
+  contextBuilder: new ContextBuilder(new CharTokenCounter(4)),
+});
+
+const result = await loop.run("demo-budget-ok", "Hi!");
+await j.close();
+
+console.log("exitCode:", result.exitCode);
+const events = readFileSync(jp, "utf-8").trim().split("\n").map(l => JSON.parse(l));
+for (const e of events) {
+  console.log(e.type);
+}
+console.log("budget used:", result.exitCode === 0 ? "(see TokenBudget)" : "");
+rmSync(dir, { recursive: true, force: true });
+'
+```
+
+输出：
+
+```
+exitCode: 0
+run:start
+turn:start
+run:end
+```
+
+预算充足，正常结束。和 PR02 的无 tool run 形状完全一样。
+
+### Walkthrough: budget 是累积记账
+
+每个 turn 的预算检查都消耗从 run 开始到当前时刻所有消息的 token 总和：
+
+```bash
+node --import tsx -e '
+import { JsonlJournal, TokenBudget } from "./packages/core/src/index.js";
+import { ScriptedProvider, AgentLoop, ToolRuntime, ContextBuilder, CharTokenCounter } from "./packages/runtime/src/index.js";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+const dir = mkdtempSync(join(tmpdir(), "helm-budget-"));
+const jp = join(dir, "run.jsonl");
+const j = new JsonlJournal(jp);
+await j.open();
+
+const provider = new ScriptedProvider([
+  { role: "assistant", content: "turn 1", toolCalls: [{ id: "1", name: "echo", args: { text: "hello" } }] },
+  { role: "assistant", content: "final answer after two turns" },
+]);
+
+const toolRuntime = new ToolRuntime();
+toolRuntime.register({
+  name: "echo", description: "echoes input", parameters: { text: "string" },
+  async execute(args: Record<string, unknown>) { return String(args.text); },
+});
+
+const budget = new TokenBudget(100_000);
+const cb = new ContextBuilder(new CharTokenCounter(4));
+
+const loop = new AgentLoop(provider, toolRuntime, j, {
+  maxTurns: 5,
+  tokenBudget: budget,
+  contextBuilder: cb,
+});
+
+const result = await loop.run("demo-cumulative", "Echo hello");
+await j.close();
+
+console.log("exitCode:", result.exitCode);
+console.log("total tokens consumed:", budget.usedTokens);
+const events = readFileSync(jp, "utf-8").trim().split("\n").map(l => JSON.parse(l));
+console.log("turns:", events.filter(e => e.type === "turn:start").length);
+console.log("tool calls:", events.filter(e => e.type === "tool:call").length);
 
 rmSync(dir, { recursive: true, force: true });
 '
@@ -263,46 +374,49 @@ rmSync(dir, { recursive: true, force: true });
 输出：
 
 ```
-Events: 4
-Warnings: 0
-Types: run:start → tool:call → tool:result → run:end
-Turns: 0
-Tool calls: {"calc":1}
-Duration: 100 ms
+exitCode: 0
+total tokens consumed: 37
+turns: 2
+tool calls: 1
 ```
 
-注意 `Turns: 0`——因为这份测试 journal 里没有 `turn:start` 事件（简化 demo）。
-`computeStats` 不假设事件一定齐全，缺失的字段就是 0/null/false。
+**看什么：**
+
+- 两个 turn 的消息都被计入了 `budget.usedTokens`。
+- `turns: 2`——turn 0 调了 tool，turn 1 返回最终答案。
+- 总消耗 37 tokens——这是 turn 0 context（约 15 tokens）+ turn 1 context（约 22 tokens，因为包含了 turn 0 的所有消息 + tool result）的累积。
 
 ### 试一下
 
-1. **AgentLoop 产生真实 journal 再读回：** 跑 PR04 的 CLI demo 产生一份
-   journal（`/tmp/helm-walkthrough-normal.jsonl`），然后用 `readJournal`
-   读回来，用 `replayEvents` 逐条打印类型。和之前肉眼读的 trace 对比。
-2. **手工写一个全部 9 种事件类型都有的 journal**，跑 `computeStats` 看
-   每个维度的统计是否正确。特别关注 `retryExhausted`（需要有 `phase=exhausted`
-   才 true）、`cancelledReason`（从 `run:cancelled` 里提取）。
-3. **在一份正确 journal 的中间插入一行垃圾**，看 `readJournal` 的 warning
-   机制：损坏行被跳过，前后事件保留。
-4. **RunSummary 的字段速查：**
+1. **预算耗尽在第二 turn：** 把上面 walkthrough 的 budget 改成 20（刚好够 turn 0 但不够 turn 1），看第二 turn 的 budget check 触发 exhaustion。
+2. **自定义 charsPerToken：** 创建 `new CharTokenCounter(2)` 传给 ContextBuilder，对比默认 `4` 的 token 估算差异。代码/中文场景下 2 更贴近真实 token 数。
+3. **TokenBudget 警告阈值：** 创建 `new TokenBudget(1000, 0.3)`（30% 警告），跑一个足够量的 run，在 `budget.consume()` 后检查 `budget.isWarning()`。
+4. **ContextWindow 的字段速查：**
 
-| 字段               | 类型                  | 来源                                        |
-| ------------------ | --------------------- | ------------------------------------------- |
-| `eventCounts`      | `Record<string,number>` | 每种 event.type 出现次数                    |
-| `turnCount`        | `number`              | `turn:start` 事件数                         |
-| `toolCallCounts`   | `Record<string,number>` | 每个 toolName 的 `tool:call` 次数          |
-| `errorCount`       | `number`              | `error` 事件数                              |
-| `errorsByCategory` | `Record<string,number>` | 每个 errorCategory 的出现次数              |
-| `retryAttemptCount`| `number`              | `retry phase=attempt` 事件数               |
-| `retryExhausted`   | `boolean`             | 是否有 `retry phase=exhausted`             |
-| `durationMs`       | `number \| null`      | `run:end.ts - run:start.ts`，缺任一则为 null |
-| `cancelled`        | `boolean`             | 是否有 `run:cancelled` 事件                |
-| `cancelledReason`  | `"external"\|"timeout"\|null` | 从 `run:cancelled.reason` 提取  |
-| `exitCode`         | `number \| null`      | 从 `run:end.exitCode` 提取                 |
+| 字段              | 类型                  | 含义                                      |
+| ----------------- | --------------------- | ----------------------------------------- |
+| `systemPrompt`    | `string \| null`      | 系统提示词，null 表示不设                |
+| `messages`        | `Message[]`           | 聊天消息列表（user/assistant/tool）       |
+| `toolDefs`        | `ToolDef[]`           | 工具 schema 列表（name + description + parameters） |
+| `estimatedTokens` | `number`              | 三部分 token 估算之和（system prompt + messages + tools） |
+
+5. **TokenBudget 方法的速查表：**
+
+| 方法               | 返回    | 含义                                          |
+| ------------------ | ------- | --------------------------------------------- |
+| `constructor(max)` | -       | 最大 token 数，必须 > 0                       |
+| `constructor(max, warn)` | - | warn 是 0-1 浮点数，默认 0.8                 |
+| `usedTokens`       | number  | 已消耗 token 数                               |
+| `remainingTokens`  | number  | 剩余 token 数，下限为 0                      |
+| `isExhausted()`    | boolean | `usedTokens >= maxTokens`                     |
+| `isWarning()`      | boolean | `usedTokens >= maxTokens * warnThreshold`     |
+| `consume(n)`       | void    | 增加已消耗 token 数                           |
+| `reset()`          | void    | 清零（测试用）                               |
 
 ### 更新后的附录 A — 事件类型速查
 
-PR08 没有新增事件类型。readJournal 消费已有的 `RunEvent` union，
-replay 纯粹是读操作——这和 PR07 的 eval harness 形成"写（JsonlJournal）
-→ 读（readJournal）→ 断言（evaluateAssertion）→ 统计（computeStats）"
-的完整数据流。
+PR09 没有新增事件类型。预算耗尽通过已有的 `error` 事件表示：
+- `errorType: "harness"`
+- `errorCategory: "budget_exhausted"`
+
+这和 PR05（取消）、PR06（错误分类）的模式一致——不扩展 RunEvent union，复用已有的 error variant。

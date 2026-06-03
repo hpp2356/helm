@@ -1,4 +1,4 @@
-import { type Provider, type JsonlJournal, classifyAgentError } from "@helm/core";
+import { type Provider, type JsonlJournal, type TokenBudget, classifyAgentError } from "@helm/core";
 import { type ToolRuntime } from "./tool-runtime.js";
 import {
   type RetryPolicy,
@@ -6,6 +6,8 @@ import {
   computeDelay,
   delayWithAbort,
 } from "./retry.js";
+import { ContextBuilder, toToolDefs } from "./context-builder.js";
+import { CharTokenCounter } from "./token-counter.js";
 
 export interface AgentLoopOptions {
   maxTurns: number;
@@ -19,6 +21,18 @@ export interface AgentLoopOptions {
    * for a reasonable starting point (3 attempts, exponential+jitter backoff).
    */
   retryPolicy?: RetryPolicy;
+  /**
+   * Token budget for this run. When set, AgentLoop checks before each
+   * provider call that the estimated context tokens fit within the
+   * remaining budget. Exhaustion stops the run with a harness error.
+   */
+  tokenBudget?: TokenBudget;
+  /**
+   * Context builder used to estimate token counts for budget checks.
+   * Required when tokenBudget is set. Defaults to a CharTokenCounter
+   * with 4 chars/token if omitted but tokenBudget is provided.
+   */
+  contextBuilder?: ContextBuilder;
 }
 
 export interface AgentLoopResult {
@@ -136,6 +150,30 @@ export class AgentLoop {
           turnIndex,
           timestamp: Date.now(),
         });
+
+        // ── Token budget check ────────────────────────────────────────
+        if (this.options.tokenBudget) {
+          const cb =
+            this.options.contextBuilder ??
+            new ContextBuilder(new CharTokenCounter());
+          const window = cb.build({
+            messages: messages as Parameters<ContextBuilder["build"]>[0]["messages"],
+            toolDefs: toToolDefs(this.toolRuntime.list()),
+          });
+          if (window.estimatedTokens > this.options.tokenBudget.remainingTokens) {
+            await this.journal.append({
+              type: "error",
+              runId,
+              message: `Token budget exhausted: ${window.estimatedTokens} tokens needed, ${this.options.tokenBudget.remainingTokens} remaining of ${this.options.tokenBudget.maxTokens}`,
+              errorType: "harness",
+              errorCategory: "budget_exhausted",
+              timestamp: Date.now(),
+            });
+            exitCode = EXIT_ERROR;
+            break;
+          }
+          this.options.tokenBudget.consume(window.estimatedTokens);
+        }
 
         // ── Provider call with retry ────────────────────────────────────
         let response: Awaited<ReturnType<Provider["send"]>> | null = null;

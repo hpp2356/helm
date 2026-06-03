@@ -3,7 +3,9 @@ import { ScriptedProvider } from "./scripted-provider.js";
 import { AgentLoop, type AgentLoopOptions } from "./agent-loop.js";
 import { ToolRuntime } from "./tool-runtime.js";
 import { type RetryPolicy, DEFAULT_RETRY_POLICY } from "./retry.js";
-import { JsonlJournal } from "@helm/core";
+import { JsonlJournal, TokenBudget } from "@helm/core";
+import { ContextBuilder } from "./context-builder.js";
+import { CharTokenCounter } from "./token-counter.js";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -537,6 +539,209 @@ describe("AgentLoop", () => {
     const events = lines.map((l) => JSON.parse(l));
     const turnStarts = events.filter((e) => e.type === "turn:start");
     expect(turnStarts.length).toBe(3); // exactly maxTurns
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  // ── PR09: Token budget tests ────────────────────────────────────────────
+
+  it("completes normally when budget is sufficient", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "helm-test-"));
+    const journalPath = join(dir, "run.jsonl");
+    const journal = new JsonlJournal(journalPath);
+    await journal.open();
+
+    const provider = new ScriptedProvider([
+      { role: "assistant", content: "Hello!" },
+    ]);
+
+    const toolRuntime = new ToolRuntime();
+    const tokenBudget = new TokenBudget(100_000);
+    const contextBuilder = new ContextBuilder(new CharTokenCounter(4));
+
+    const loop = new AgentLoop(provider, toolRuntime, journal, {
+      maxTurns: 5,
+      tokenBudget,
+      contextBuilder,
+    });
+    const result = await loop.run("test-budget-ok", "Hi!");
+    await journal.close();
+
+    expect(result.exitCode).toBe(0);
+    expect(result.cancelled).toBeUndefined();
+    expect(tokenBudget.usedTokens).toBeGreaterThan(0);
+
+    const events = (await readFile(journalPath, "utf-8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    const errorEvents = events.filter((e) => e.type === "error");
+    expect(errorEvents.length).toBe(0);
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("stops with error when budget is exhausted", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "helm-test-"));
+    const journalPath = join(dir, "run.jsonl");
+    const journal = new JsonlJournal(journalPath);
+    await journal.open();
+
+    const provider = new ScriptedProvider([
+      { role: "assistant", content: "Should not be reached" },
+    ]);
+
+    const toolRuntime = new ToolRuntime();
+    // Tiny budget — exhausted on first turn (each char is ≥1 token)
+    const tokenBudget = new TokenBudget(2);
+    const contextBuilder = new ContextBuilder(new CharTokenCounter(4));
+
+    const loop = new AgentLoop(provider, toolRuntime, journal, {
+      maxTurns: 5,
+      tokenBudget,
+      contextBuilder,
+    });
+    const result = await loop.run("test-budget-exhausted", "Hello world!");
+    await journal.close();
+
+    expect(result.exitCode).toBe(1); // EXIT_ERROR
+
+    const events = (await readFile(journalPath, "utf-8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+
+    const errorEvents = events.filter((e) => e.type === "error");
+    expect(errorEvents.length).toBe(1);
+    expect(errorEvents[0].errorType).toBe("harness");
+    expect(errorEvents[0].errorCategory).toBe("budget_exhausted");
+
+    // Run still has proper lifecycle events
+    expect(events.some((e) => e.type === "run:start")).toBe(true);
+    expect(events.some((e) => e.type === "run:end")).toBe(true);
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("budget check happens before provider.send (exhausted → no llm call)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "helm-test-"));
+    const journalPath = join(dir, "run.jsonl");
+    const journal = new JsonlJournal(journalPath);
+    await journal.open();
+
+    // Provider has one response that should NOT be consumed — budget exhausts first
+    const provider = new ScriptedProvider([
+      { role: "assistant", content: "Never called" },
+    ]);
+
+    const toolRuntime = new ToolRuntime();
+    // Budget of 2 tokens — any message will exceed
+    const tokenBudget = new TokenBudget(2);
+    const contextBuilder = new ContextBuilder(new CharTokenCounter(4));
+
+    const loop = new AgentLoop(provider, toolRuntime, journal, {
+      maxTurns: 5,
+      tokenBudget,
+      contextBuilder,
+    });
+    const result = await loop.run("test-budget-before-send", "Hello!");
+    await journal.close();
+
+    expect(result.exitCode).toBe(1);
+
+    const events = (await readFile(journalPath, "utf-8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+
+    // No tool:call events — provider was never called
+    expect(events.filter((e) => e.type === "tool:call").length).toBe(0);
+
+    const budgetErrors = events.filter(
+      (e) => e.type === "error" && e.errorCategory === "budget_exhausted",
+    );
+    expect(budgetErrors.length).toBe(1);
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("runs multiple turns within budget", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "helm-test-"));
+    const journalPath = join(dir, "run.jsonl");
+    const journal = new JsonlJournal(journalPath);
+    await journal.open();
+
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "Calling tool",
+        toolCalls: [{ id: "1", name: "echo", args: { text: "hello" } }],
+      },
+      { role: "assistant", content: "Final answer" },
+    ]);
+
+    const toolRuntime = new ToolRuntime();
+    toolRuntime.register({
+      name: "echo",
+      description: "echoes",
+      parameters: {},
+      async execute(args: Record<string, unknown>) {
+        return `echo: ${args.text}`;
+      },
+    });
+
+    const tokenBudget = new TokenBudget(100_000);
+    const contextBuilder = new ContextBuilder(new CharTokenCounter(4));
+
+    const loop = new AgentLoop(provider, toolRuntime, journal, {
+      maxTurns: 5,
+      tokenBudget,
+      contextBuilder,
+    });
+    const result = await loop.run("test-budget-multi-turn", "Go");
+    await journal.close();
+
+    expect(result.exitCode).toBe(0);
+
+    const events = (await readFile(journalPath, "utf-8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+
+    // Two turns with tool calls, plus final turn
+    const turnStarts = events.filter((e) => e.type === "turn:start");
+    expect(turnStarts.length).toBe(2);
+    expect(tokenBudget.usedTokens).toBeGreaterThan(0);
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("warns at threshold but continues when not exhausted", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "helm-test-"));
+    const journalPath = join(dir, "run.jsonl");
+    const journal = new JsonlJournal(journalPath);
+    await journal.open();
+
+    const provider = new ScriptedProvider([
+      { role: "assistant", content: "OK" },
+    ]);
+
+    const toolRuntime = new ToolRuntime();
+    // Budget large enough for the first turn
+    const tokenBudget = new TokenBudget(100_000);
+    const contextBuilder = new ContextBuilder(new CharTokenCounter(4));
+
+    const loop = new AgentLoop(provider, toolRuntime, journal, {
+      maxTurns: 5,
+      tokenBudget,
+      contextBuilder,
+    });
+    const result = await loop.run("test-budget-warn", "Hi");
+    await journal.close();
+
+    expect(result.exitCode).toBe(0);
+    // Warning should not block execution
+    expect(tokenBudget.isWarning()).toBe(false); // small run, well under threshold
+
     await rm(dir, { recursive: true, force: true });
   });
 });

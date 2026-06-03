@@ -8,3 +8,6 @@ export {
   computeDelay,
   delayWithAbort,
 } from "./retry.js";
+export { type TokenCounter, CharTokenCounter } from "./token-counter.js";
+export { ContextBuilder, toToolDefs } from "./context-builder.js";
+export type { ContextBuilderOptions } from "./context-builder.js";

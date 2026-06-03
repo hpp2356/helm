@@ -12,3 +12,4 @@ export {
   classifyAgentError,
   providerError,
 } from "./errors.js";
+export { type ToolDef, type ContextWindow, TokenBudget } from "./context.js";
