@@ -62,6 +62,32 @@ pnpm build
 
 Do not rely on real LLM API calls in unit tests.
 
+## Walkthrough / Demo Scripts
+
+Demo scripts go in `demo/` as standalone `.ts` files, not inline `npx tsx -e` blocks.
+Inline code is fragile — copy-paste errors, shell escaping, and CJS/ESM issues break it.
+
+Rules for demo scripts:
+- `import { ... } from "../packages/xxx/dist/index.js"` — relative paths to built dist
+- Top-level `import` + `await` — root `package.json` has `"type": "module"` so this works
+- Run with `tsx demo/pr<NN>-<name>.ts` (tsx is a root devDependency)
+- Must run `pnpm build` first (or at least build the packages the demo imports)
+- Walkthrough references scripts by filename, not inline code blocks
+- Each demo script added to `package.json` scripts as `demo:<name>` for IDEA debugging
+
+### API Key
+
+Demo scripts read key from `demo/api-key.ts` shared helper.
+Priority: `DEEPSEEK_API_KEY` env var > `~/.deepseek-api-key` file.
+User runs `echo "sk-..." > ~/.deepseek-api-key` once — key file is outside repo, never tracked by git.
+
+### IDEA Debugging
+
+`.idea/runConfigurations/` contains IntelliJ IDEA run configs (one per demo script).
+They point to `package.json` scripts (`demo:*`), so user can set breakpoints and Debug directly.
+IDEA auto-detects pnpm as the package manager.
+If IDEA doesn't pick them up: File → New → "npm" run configuration → pick "demo:..." script from package.json.
+
 ## Workflow Rule
 
 Claude workflow may be used only for read-only review, architecture critique, and test gap analysis unless the user explicitly authorizes file changes.
