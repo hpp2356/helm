@@ -92,6 +92,7 @@ export function createBashTool(opts: BashToolOptions): Tool {
           cwd: resolvedCwd,
           env: { ...process.env, ...(args.env as Record<string, string> | undefined) },
           stdio: ["ignore", "pipe", "pipe"],
+          detached: true, // own process group so we can kill the entire tree
         });
 
         let stdout = "";
@@ -100,15 +101,33 @@ export function createBashTool(opts: BashToolOptions): Tool {
         let stderrTruncated = false;
         let killed = false;
 
+        // Kill the entire process group (shell + its children).
+        // On Linux, dash as /bin/sh does not forward signals to foreground
+        // children, so child.kill() only kills the shell.  detached: true
+        // gives the child its own process group, and process.kill(-pgid)
+        // kills everything in that group.
+        const killPg = (signal: NodeJS.Signals) => {
+          try {
+            if (child.pid !== undefined) {
+              process.kill(-child.pid, signal);
+            } else {
+              child.kill(signal);
+            }
+          } catch {
+            // Fallback if process group doesn't exist (e.g. already exited)
+            child.kill(signal);
+          }
+        };
+
         // Timeout guard
         const timeoutHandle =
           timeout && timeout > 0
             ? setTimeout(() => {
                 killed = true;
-                child.kill("SIGTERM");
+                killPg("SIGTERM");
                 // Force kill after 2s if still alive
                 const forceHandle = setTimeout(() => {
-                  if (!child.killed) child.kill("SIGKILL");
+                  if (!child.killed) killPg("SIGKILL");
                 }, 2000);
                 // Don't let the force handle keep the process alive
                 if (forceHandle.unref) forceHandle.unref();
@@ -118,7 +137,7 @@ export function createBashTool(opts: BashToolOptions): Tool {
         // External signal handling (signal.aborted already checked above)
         const onAbort = () => {
           killed = true;
-          child.kill("SIGTERM");
+          killPg("SIGTERM");
         };
         if (signal) {
           signal.addEventListener("abort", onAbort, { once: true });
