@@ -176,6 +176,11 @@ export class AgentLoop {
         }
 
         // ── Provider call with retry ────────────────────────────────────
+        // Notify provider about available tools before the call.
+        // ScriptedProvider doesn't implement setTools — the optional
+        // call is silently skipped for providers that don't need it.
+        this.provider.setTools?.(toToolDefs(this.toolRuntime.list()));
+
         let response: Awaited<ReturnType<Provider["send"]>> | null = null;
         let providerSucceeded = false;
 

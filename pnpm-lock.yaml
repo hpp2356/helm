@@ -38,6 +38,22 @@ importers:
         specifier: workspace:*
         version: link:../runtime
 
+  packages/provider-deepseek:
+    dependencies:
+      '@helm/core':
+        specifier: workspace:*
+        version: link:../core
+      '@helm/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+      openai:
+        specifier: ^6.42.0
+        version: 6.42.0
+    devDependencies:
+      gpt-tokenizer:
+        specifier: ^3.4.0
+        version: 3.4.0
+
   packages/replay:
     dependencies:
       '@helm/core':
@@ -257,6 +273,9 @@ packages:
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
     os: [darwin]
 
+  gpt-tokenizer@3.4.0:
+    resolution: {integrity: sha512-wxFLnhIXTDjYebd9A9pGl3e31ZpSypbpIJSOswbgop5jLte/AsZVDvjlbEuVFlsqZixVKqbcoNmRlFDf6pz/UQ==}
+
   lightningcss-android-arm64@1.32.0:
     resolution: {integrity: sha512-YK7/ClTt4kAK0vo6w3X+Pnm0D2cf2vPHbhOXdoNti1Ga0al1P4TBZhwjATvjNwLEBCnKvjJc2jQgHXH0NEwlAg==}
     engines: {node: '>= 12.0.0'}
@@ -341,6 +360,17 @@ packages:
 
   obug@2.1.1:
     resolution: {integrity: sha512-uTqF9MuPraAQ+IsnPf366RG4cP9RtUi7MLO1N3KEc+wb0a6yKpeL0lmk2IB1jY5KHPAlTc6T/JRdC/YqxHNwkQ==}
+
+  openai@6.42.0:
+    resolution: {integrity: sha512-1WFEt/uXMXOLhYRNkgJWo08Y2YNvNwpVU72K7ibrWgWpNOXd4VojXLbe6SQ4bLiUQ3Y8jz4IiyVkylJCL1DtZg==}
+    peerDependencies:
+      ws: ^8.18.0
+      zod: ^3.25 || ^4.0
+    peerDependenciesMeta:
+      ws:
+        optional: true
+      zod:
+        optional: true
 
   pathe@2.0.3:
     resolution: {integrity: sha512-WUjGcAqP1gQacoQe+OBJsFA7Ld4DyXuUIjZ5cc75cLHvJ7dtNsTugphxIADwspS+AraAUePCKrSVtPLFj/F88w==}
@@ -653,6 +683,8 @@ snapshots:
   fsevents@2.3.3:
     optional: true
 
+  gpt-tokenizer@3.4.0: {}
+
   lightningcss-android-arm64@1.32.0:
     optional: true
 
@@ -709,6 +741,8 @@ snapshots:
   nanoid@3.3.12: {}
 
   obug@2.1.1: {}
+
+  openai@6.42.0: {}
 
   pathe@2.0.3: {}
 
