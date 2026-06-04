@@ -11,3 +11,18 @@ export {
 export { type TokenCounter, CharTokenCounter } from "./token-counter.js";
 export { ContextBuilder, toToolDefs } from "./context-builder.js";
 export type { ContextBuilderOptions } from "./context-builder.js";
+export { WorkspaceGuard } from "./workspace-guard.js";
+export {
+  createReadTool,
+  createWriteTool,
+  createEditTool,
+  createLsTool,
+  createGlobTool,
+  registerFileTools,
+  FILE_TOOL_RISK_LEVELS,
+} from "./file-tools.js";
+export type { FileToolOptions } from "./file-tools.js";
+export { BashSafety } from "./bash-safety.js";
+export type { BashSafetyResult } from "./bash-safety.js";
+export { createBashTool, registerBashTool, BASH_TOOL_RISK_LEVEL } from "./bash-tool.js";
+export type { BashToolOptions } from "./bash-tool.js";
