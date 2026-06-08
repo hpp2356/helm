@@ -69,6 +69,52 @@ describe("sanitize", () => {
   });
 });
 
+describe("StatusBar", () => {
+  it("renders full bar at >=100 cols", async () => {
+    const { renderStatusBar } = await import("../src/status-bar.js");
+    const { buildTheme } = await import("../src/theme.js");
+    const t = buildTheme("no-color");
+    const result = renderStatusBar({
+      theme: t, cols: 120,
+      model: "deepseek-v4-flash", mode: "interactive",
+      contextPct: 30, cost: 0.003, durationMs: 12000,
+      currentTool: "read_file", bgTasks: 2,
+    });
+    expect(result).toContain("deepseek-v4-flash");
+    expect(result).toContain("30%");
+    expect(result).toContain("read_file");
+    expect(result).toContain("2bg");
+  });
+
+  it("hides tool and bg at <80 cols", async () => {
+    const { renderStatusBar } = await import("../src/status-bar.js");
+    const { buildTheme } = await import("../src/theme.js");
+    const t = buildTheme("no-color");
+    const result = renderStatusBar({
+      theme: t, cols: 65,
+      model: "deepseek-v4-flash", mode: "interactive",
+      contextPct: 30, cost: null, durationMs: 5000,
+      currentTool: null, bgTasks: 0,
+    });
+    expect(result).not.toContain("read_file");
+    expect(result).toContain("30%");
+  });
+
+  it("shows auto-approve warning", async () => {
+    const { renderStatusBar } = await import("../src/status-bar.js");
+    const { buildTheme } = await import("../src/theme.js");
+    const t = buildTheme("no-color");
+    const result = renderStatusBar({
+      theme: t, cols: 100,
+      model: "ds", mode: "auto-approve",
+      contextPct: 50, cost: null, durationMs: 0,
+      currentTool: null, bgTasks: 0,
+    });
+    expect(result).toContain("⚠");
+    expect(result).toContain("auto-approve");
+  });
+});
+
 describe("TurnStateMachine", () => {
   it("starts idle", async () => {
     const { TurnStateMachine } = await import("../src/state-machine.js");
