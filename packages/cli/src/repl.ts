@@ -222,6 +222,10 @@ let statusPaused = false;
 
 function paintStatusBar(): void {
   if (statusPaused || !process.stdout.isTTY) return;
+  // During a turn the spinner owns the scrollback; the cursor is NOT at the
+  // composer bottom rule, so \x1b[2A would land on the wrong row.  Only paint
+  // when we are at the prompt (spinner not running).
+  if (activeSpinner !== null) return;
   const cols = termCols();
   const bar = renderStatusBar({ theme, cols, ...statusState });
   // Status bar sits above Composer top rule: save → up 2 → col 0 → clear line → draw → restore
@@ -232,6 +236,7 @@ function startStatusTimer(): void {
   if (statusTimer) return;
   statusTimer = setInterval(() => {
     if (statusState.turnStart > 0) statusState.durationMs = Date.now() - statusState.turnStart;
+    // paintStatusBar already guards against activeSpinner !== null
     paintStatusBar();
   }, 1000);
   statusTimer.unref?.();
