@@ -62,6 +62,24 @@ export class InputFrame {
     this.paintBottom();
   }
 
+  /**
+   * Re-draw the top rule after a paste collapse.
+   * Call this after clearing the paste overflow rows but BEFORE _refreshLine,
+   * so the top rule appears above the re-drawn input line.
+   */
+  /**
+   * Re-draw the top rule after a paste collapse.
+   * Writes the top rule followed by a newline so the cursor lands on the input
+   * row, ready for readline's _refreshLine to render the prompt there.
+   * Does NOT reserve the bottom rule row (that row already exists from the
+   * previous open() call).
+   */
+  redrawTopRule(): void {
+    if (!process.stdout.isTTY) return;
+    process.stdout.write(this.frameRule() + "\n");
+    this.active = true;
+  }
+
   private paintBottom(): void {
     if (!this.active || !process.stdout.isTTY) return;
     process.stdout.write("\x1b7\x1b[1B\r\x1b[2K" + this.frameRule() + "\x1b8");

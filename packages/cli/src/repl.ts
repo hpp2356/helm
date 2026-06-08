@@ -377,13 +377,28 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     if (key.name === "paste-start") { paste.start(); return; }
     if (key.name === "paste-end") {
       const { block, echoedRows } = paste.end(rl.line);
+      // Single-line paste (no inner newlines): leave readline buffer untouched.
       if (echoedRows === 0) return;
       const placeholder = pastePlaceholder(block);
       pastedBlocks.set(placeholder, block);
-      if (isTTY && echoedRows > 0) process.stdout.write(`\r\x1b[${echoedRows}A\x1b[0J`);
       const rlI = rl as unknown as { line: string; cursor: number; _refreshLine: () => void };
-      rlI.line = placeholder; rlI.cursor = placeholder.length; rlI._refreshLine();
-      frame.repaint();
+      rlI.line = placeholder; rlI.cursor = placeholder.length;
+      if (isTTY) {
+        // The paste echoed `echoedRows` extra rows above the current (tail) row.
+        // Clear all paste overflow rows plus the original input row, then
+        // reprompt so a fresh status bar + frame appears at the clean position.
+        frame.close();
+        // +1 for input row, +1 for top rule, +1 for status bar = +3
+        process.stdout.write(`\r\x1b[${echoedRows + 3}A\x1b[0J`);
+        // reprompt() calls rl.prompt() which resets rl.line to "".
+        // Re-set the placeholder after reprompt so _refreshLine shows it.
+        reprompt();
+        rlI.line = placeholder; rlI.cursor = placeholder.length;
+        rlI._refreshLine();
+        frame.repaint();
+      } else {
+        rlI._refreshLine();
+      }
       return;
     }
 
