@@ -1,0 +1,17 @@
+{
+  "provider": "deepseek",
+  "model": "deepseek-v4-flash",
+  "apiKeyEnv": "DEEPSEEK_API_KEY",
+
+  "tools": "packages/cli/fixtures/tools.json",
+  "perms": "packages/cli/fixtures/perms.json",
+  "workspace": ".",
+
+  "compaction": "truncate",
+  "compactionKeepTurns": 3,
+  "tokenBudget": 32000,
+  "maxTurns": 20
+
+  ,"nonInteractive": null,
+  "riskThreshold": null
+}

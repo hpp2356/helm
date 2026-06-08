@@ -72,9 +72,48 @@ function isNonInteractiveStrategy(
 
 const EXIT_PERMISSION_DENIED = 2;
 
+// ── Config file ───────────────────────────────────────────────────────────
+
+interface HelmRcFile {
+  provider?: "scripted" | "deepseek";
+  model?: string;
+  apiKey?: string;
+  /** Env var name for API key (e.g. "DEEPSEEK_API_KEY"). */
+  apiKeyEnv?: string;
+  tools?: string;
+  perms?: string;
+  workspace?: string;
+  nonInteractive?: "auto-approve" | "auto-deny" | "risk-threshold";
+  riskThreshold?: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  compaction?: "summarize" | "truncate";
+  compactionKeepTurns?: number;
+  tokenBudget?: number;
+  maxTurns?: number;
+}
+
+function loadHelmRc(): HelmRcFile {
+  const candidates = [
+    resolve(process.cwd(), ".helmrc.json"),
+    resolve(process.env.HOME ?? "/tmp", ".helmrc.json"),
+  ];
+  for (const p of candidates) {
+    try {
+      if (existsSync(p)) {
+        return JSON.parse(readFileSync(p, "utf-8")) as HelmRcFile;
+      }
+    } catch {
+      // Non-fatal
+    }
+  }
+  return {};
+}
+
 // ── REPL argument parsing ─────────────────────────────────────────────────
 
-function parseReplArgs(args: string[]): {
+function parseReplArgs(
+  args: string[],
+  base: HelmRcFile = {},
+): {
   providerKind: "scripted" | "deepseek";
   model?: string;
   apiKey?: string;
@@ -88,18 +127,31 @@ function parseReplArgs(args: string[]): {
   tokenBudgetMax?: number;
   maxTurns: number;
 } {
-  let providerKind: "scripted" | "deepseek" = "scripted";
-  let model: string | undefined;
-  let apiKey: string | undefined;
-  let toolsPath: string | undefined;
-  let permsPath: string | undefined;
-  let workspaceRoot: string | undefined;
+  // Apply config file first, CLI flags override
+  let providerKind: "scripted" | "deepseek" = base.provider ?? "scripted";
+  let model: string | undefined = base.model;
+  let apiKey: string | undefined =
+    base.apiKey ??
+    (base.apiKeyEnv ? process.env[base.apiKeyEnv] : undefined);
+  let toolsPath: string | undefined = base.tools;
+  let permsPath: string | undefined = base.perms;
+  let workspaceRoot: string | undefined = base.workspace;
   let nonInteractive: NonInteractiveStrategy | undefined;
   let riskThreshold: RiskLevel | undefined;
-  let compaction: CompactionStrategy | undefined;
-  let compactionKeepTurns = 2;
-  let tokenBudgetMax: number | undefined;
-  let maxTurns = 20;
+  let compaction: CompactionStrategy | undefined = base.compaction;
+  let compactionKeepTurns = base.compactionKeepTurns ?? 2;
+  let tokenBudgetMax: number | undefined = base.tokenBudget;
+  let maxTurns = base.maxTurns ?? 20;
+
+  if (base.nonInteractive && isNonInteractiveStrategy(base.nonInteractive)) {
+    nonInteractive = base.nonInteractive;
+  }
+  if (
+    base.riskThreshold &&
+    base.riskThreshold in RiskLevel
+  ) {
+    riskThreshold = RiskLevel[base.riskThreshold];
+  }
 
   for (const arg of args) {
     if (arg.startsWith("--provider=")) {
@@ -174,14 +226,32 @@ function parseReplArgs(args: string[]): {
 async function main() {
   const rawArgs = process.argv.slice(2);
 
-  // Dispatch: bare `helm` or `helm repl` → interactive REPL
-  if (
+  // Dispatch:
+  //   `helm` / `helm repl` / `helm --flags` → REPL
+  //   `helm run ...` / `helm tools.json ...` → batch
+  const isRepl =
     rawArgs.length === 0 ||
-    (rawArgs.length >= 1 && rawArgs[0] === "repl")
-  ) {
+    rawArgs[0] === "repl" ||
+    rawArgs[0]?.startsWith("--");
+
+  if (isRepl) {
     const replArgs = rawArgs[0] === "repl" ? rawArgs.slice(1) : rawArgs;
     const { startRepl } = await import("../src/repl.js");
-    const parsed = parseReplArgs(replArgs);
+    const config = loadHelmRc();
+
+    // Detect which config file was found
+    const cwdRc = resolve(process.cwd(), ".helmrc.json");
+    const homeRc = resolve(process.env.HOME ?? "/tmp", ".helmrc.json");
+    const configPath =
+      Object.keys(config).length > 0
+        ? existsSync(cwdRc)
+          ? cwdRc
+          : existsSync(homeRc)
+            ? homeRc
+            : undefined
+        : undefined;
+
+    const parsed = parseReplArgs(replArgs, config);
 
     // Build provider
     let replProvider: Provider;
@@ -219,6 +289,7 @@ async function main() {
     return startRepl({
       provider: replProvider,
       providerName,
+      configPath,
       toolsPath: parsed.toolsPath,
       permsPath: parsed.permsPath,
       workspaceRoot: parsed.workspaceRoot,

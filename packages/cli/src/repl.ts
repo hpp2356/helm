@@ -46,6 +46,8 @@ export interface ReplConfig {
   tokenBudgetMax?: number;
   /** Max turns per AgentLoop run. */
   maxTurns: number;
+  /** Config file path (if loaded). */
+  configPath?: string;
 }
 
 interface PermRule {
@@ -239,6 +241,9 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   );
   if (config.nonInteractive) {
     console.log(`Permission: non-interactive (${config.nonInteractive})`);
+  }
+  if (config.configPath) {
+    console.log(`Config:   ${config.configPath}`);
   }
 
   rl.prompt();
