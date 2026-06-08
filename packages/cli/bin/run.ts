@@ -359,9 +359,23 @@ async function main() {
     const budgetMax = tokenBudgetMax ?? 4096;
 
     tokenBudget = new TokenBudget(budgetMax);
+
+    // When summarizing, give compaction its own ScriptedProvider so it
+    // doesn't consume responses meant for the main agent loop.
+    const compactionProvider =
+      compactionStrategy === "summarize"
+        ? new ScriptedProvider([
+            {
+              role: "assistant" as const,
+              content:
+                "[Compaction summary] Previous conversation covered tool calls and their results. The agent completed several tasks successfully.",
+            },
+          ])
+        : undefined;
+
     compaction = new Compaction({
       strategy: compactionStrategy,
-      provider: compactionStrategy === "summarize" ? baseProvider : undefined,
+      provider: compactionProvider,
       tokenCounter,
       keepRecentTurns: compactionKeepTurns,
     });
