@@ -29,6 +29,10 @@ importers:
       '@helm/runtime':
         specifier: workspace:*
         version: link:../runtime
+    optionalDependencies:
+      '@helm/provider-deepseek':
+        specifier: workspace:*
+        version: link:../provider-deepseek
 
   packages/core: {}
 

@@ -1,5 +1,5 @@
 export { ScriptedProvider, type ScriptedErrorEntry, type ScriptedResponse } from "./scripted-provider.js";
-export { AgentLoop, type AgentLoopOptions } from "./agent-loop.js";
+export { AgentLoop, type AgentLoopOptions, type AgentLoopResult, type MessageRecord } from "./agent-loop.js";
 export { ToolRuntime } from "./tool-runtime.js";
 export { PermissionRuntime } from "./permission-runtime.js";
 export {
