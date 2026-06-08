@@ -388,6 +388,11 @@ class InputFrame {
     this.active = false;
   }
 
+  /** Whether a framed prompt is currently being shown (used by resize). */
+  isActive(): boolean {
+    return this.active;
+  }
+
   private paintBottom(): void {
     if (!this.active || !process.stdout.isTTY) return;
     // Save cursor (on the input row) → newline + bottom rule → restore cursor.
@@ -649,6 +654,20 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     frame.open();
   };
 
+  // ── Live resize: reflow the active input frame to the new width ──────
+  // The top rule is baked into the prompt at draw-time, so a resize alone
+  // won't update it. When the terminal resizes while a framed prompt is
+  // showing, step up to the top-rule row, clear the 3-row frame, and redraw
+  // at the new width. readline preserves the typed line (rl.line) across the
+  // redraw on its own — we must NOT re-write it, or it doubles.
+  const onResize = (): void => {
+    if (!frame.isActive() || !process.stdout.isTTY) return;
+    frame.close(); // suspend keypress repaints during the redraw
+    process.stdout.write("\x1b[1A\r\x1b[0J"); // up to top rule, clear frame
+    reprompt(); // redraws top rule + preserved input, re-anchors bottom rule
+  };
+  if (process.stdout.isTTY) process.stdout.on("resize", onResize);
+
   // ── REPL state ─────────────────────────────────────────────────────
   const SYSTEM_MESSAGE: MessageRecord | null =
     config.systemPrompt !== undefined
@@ -903,6 +922,7 @@ Session stats:
   rl.on("close", () => {
     frame.close();
     frame.detach();
+    process.stdout.off("resize", onResize);
     try {
       const dir = process.env.HOME ?? "/tmp";
       writeFileSync(
