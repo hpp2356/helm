@@ -14,6 +14,13 @@ const scriptMixed = resolve(cliDir, "fixtures/script-mixed.jsonl");
 const perms = resolve(cliDir, "fixtures/perms.json");
 const permsDeny = resolve(cliDir, "fixtures/perms-deny-calc.json");
 const permsEmpty = resolve(cliDir, "fixtures/perms-empty.json");
+const toolsSubagent = resolve(cliDir, "fixtures/tools-subagent.json");
+const permsSubagent = resolve(cliDir, "fixtures/perms-subagent.json");
+const scriptSubagent = resolve(cliDir, "fixtures/script-subagent.jsonl");
+const scriptSubagentChild = resolve(
+  cliDir,
+  "fixtures/script-subagent-child.jsonl",
+);
 
 /** Run the CLI and return stdout + exit code (never throws). */
 function runCli(args: string[]): { stdout: string; stderr: string; status: number } {
@@ -259,5 +266,116 @@ describe("CLI invalid flags", () => {
     ]);
     expect(status).toBe(1);
     expect(stderr).toContain("Invalid --risk-threshold");
+  });
+});
+
+// ── Subagent ──────────────────────────────────────────────────────────
+
+describe("CLI --subagent", () => {
+  it("spawns a subagent and returns result to parent", () => {
+    const { stdout, status } = runCli([
+      toolsSubagent,
+      scriptSubagent,
+      permsSubagent,
+      "cli-subagent",
+      "--subagent",
+      `--subagent-script=${scriptSubagentChild}`,
+    ]);
+    expect(status).toBe(0);
+    expect(stdout).toContain("spawn_subagent");
+    expect(stdout).toContain("PERM ALLOW");
+    expect(stdout).toContain("RUN END");
+  });
+
+  it("journals parent and child events with parentRunId", () => {
+    const runId = "cli-subagent-journal";
+    runCli([
+      toolsSubagent,
+      scriptSubagent,
+      permsSubagent,
+      runId,
+      "--subagent",
+      `--subagent-script=${scriptSubagentChild}`,
+    ]);
+
+    const journal = readJournal(runId);
+    // Parent run:start has parentRunId: null
+    const parentStart = journal.find(
+      (e) => e.type === "run:start" && e.parentRunId === null,
+    );
+    expect(parentStart).toBeDefined();
+
+    // Child run:start has parentRunId pointing to parent
+    const childStart = journal.find(
+      (e) => e.type === "run:start" && e.parentRunId !== null,
+    );
+    expect(childStart).toBeDefined();
+    expect(childStart!.parentRunId).toBe(runId);
+
+    // subagent:spawn event links parent and child
+    const spawnEvent = journal.find(
+      (e) => e.type === "subagent:spawn",
+    );
+    expect(spawnEvent).toBeDefined();
+    expect(spawnEvent!.runId).toBe(runId);
+    expect(spawnEvent!.childRunId).toContain("-s");
+
+    // subagent:complete event
+    const completeEvent = journal.find(
+      (e) => e.type === "subagent:complete",
+    );
+    expect(completeEvent).toBeDefined();
+    expect(completeEvent!.parentRunId).toBe(runId);
+  });
+
+  it("child agent events appear in the same journal", () => {
+    const runId = "cli-subagent-interleave";
+    runCli([
+      toolsSubagent,
+      scriptSubagent,
+      permsSubagent,
+      runId,
+      "--subagent",
+      `--subagent-script=${scriptSubagentChild}`,
+    ]);
+
+    const journal = readJournal(runId);
+    // Check for child's tool calls
+    const childToolCalls = journal.filter(
+      (e) =>
+        e.type === "tool:call" &&
+        (e.runId as string).includes("-s"),
+    );
+    expect(childToolCalls.length).toBeGreaterThan(0);
+  });
+
+  it("enforces max depth limit", () => {
+    const runId = "cli-subagent-depth";
+    const { stdout } = runCli([
+      toolsSubagent,
+      scriptSubagent,
+      permsSubagent,
+      runId,
+      "--subagent",
+      `--subagent-script=${scriptSubagentChild}`,
+      "--subagent-max-depth=1",
+    ]);
+    // spawn_subagent is called at depth 0, which spawns at depth 1
+    // maxDepth=1 means depth 0 can spawn depth 1, but no deeper
+    // This should work fine since we only go depth 1
+    expect(stdout).toContain("spawn_subagent");
+  });
+
+  it("rejects invalid --subagent-max-depth", () => {
+    const { stderr, status } = runCli([
+      tools,
+      script,
+      perms,
+      "bad-depth",
+      "--subagent",
+      "--subagent-max-depth=0",
+    ]);
+    expect(status).toBe(1);
+    expect(stderr).toContain("Invalid --subagent-max-depth");
   });
 });

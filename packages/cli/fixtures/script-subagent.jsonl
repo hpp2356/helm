@@ -1,0 +1,2 @@
+{"role":"assistant","content":"Let me delegate this to a subagent.","toolCalls":[{"id":"tc1","name":"spawn_subagent","args":{"task":"Read the config file and report back.","tools":["read"]}}]}
+{"role":"assistant","content":"The subagent completed successfully."}

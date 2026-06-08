@@ -17,6 +17,8 @@ import {
   Compaction,
   CharTokenCounter,
   ContextBuilder,
+  SubagentRuntime,
+  createSubagentTool,
 } from "@helm/runtime";
 import type { CompactionStrategy } from "@helm/runtime";
 
@@ -77,6 +79,9 @@ async function main() {
   let turnDelayMs = 0;
   let nonInteractive: NonInteractiveStrategy | undefined;
   let riskThreshold: RiskLevel | undefined;
+  let subagentEnabled = false;
+  let subagentMaxDepth = 3;
+  let subagentScriptPath: string | undefined;
   let compactionStrategy: CompactionStrategy | undefined;
   let compactionKeepTurns = 2;
   let tokenBudgetMax: number | undefined;
@@ -132,6 +137,19 @@ async function main() {
         process.exit(1);
       }
       tokenBudgetMax = v;
+    } else if (arg === "--subagent") {
+      subagentEnabled = true;
+    } else if (arg.startsWith("--subagent-script=")) {
+      subagentScriptPath = arg.slice("--subagent-script=".length);
+    } else if (arg.startsWith("--subagent-max-depth=")) {
+      const v = Number(arg.slice("--subagent-max-depth=".length));
+      if (!Number.isInteger(v) || v < 1) {
+        console.error(
+          `Invalid --subagent-max-depth value: ${arg}. Must be an integer >= 1.`,
+        );
+        process.exit(1);
+      }
+      subagentMaxDepth = v;
     } else if (arg.startsWith("--timeout=")) {
       const v = Number(arg.slice("--timeout=".length));
       if (!Number.isFinite(v) || v <= 0) {
@@ -181,6 +199,12 @@ async function main() {
     );
     console.error(
       "  --token-budget=<n>                            (token budget for compaction trigger)",
+    );
+    console.error(
+      "  --subagent                                    (enable spawn_subagent tool)",
+    );
+    console.error(
+      "  --subagent-max-depth=<n>                      (max nesting depth, default: 3)",
     );
     console.error("  --timeout=<ms>");
     console.error("  --turn-delay-ms=<ms>");
@@ -313,6 +337,16 @@ async function main() {
           `🗜️  [${ts}] COMPACTION    strategy=${event.strategy} msgs ${event.messageCountBefore}→${event.messageCountAfter} tokens ${event.tokensEstimatedBefore}→${event.tokensEstimatedAfter}`,
         );
         break;
+      case "subagent:spawn":
+        console.log(
+          `🤖 [${ts}] SUBAGENT SPAWN  parent=${event.runId} child=${event.childRunId}`,
+        );
+        break;
+      case "subagent:complete":
+        console.log(
+          `🏁 [${ts}] SUBAGENT DONE   child=${event.runId} parent=${event.parentRunId} exitCode=${event.exitCode}`,
+        );
+        break;
       case "run:end":
         console.log(`✅ [${ts}] RUN END      exitCode=${event.exitCode}`);
         break;
@@ -328,20 +362,23 @@ async function main() {
     compactionStrategy
       ? `compaction=${compactionStrategy}, keep=${compactionKeepTurns}, budget=${tokenBudgetMax ?? 4096}`
       : null,
+    subagentEnabled
+      ? `subagent, maxDepth=${subagentMaxDepth}`
+      : null,
   ]
     .filter(Boolean)
     .join(", ");
   console.log(`\n${"=".repeat(50)}`);
   console.log(`Helm CLI — runId: ${runId}`);
   console.log(
-    `Tools: ${toolDefs.length}, Script: ${scriptLines.length}, Perms: ${permRules.length}` +
+    `Tools: ${toolRuntime.getToolNames().length}, Script: ${scriptLines.length}, Perms: ${permRules.length}` +
       (timeoutMs !== undefined ? `, Timeout: ${timeoutMs}ms` : "") +
       `, Mode: ${modeLabel}`,
   );
   console.log(`Journal: ${journalPath}`);
   console.log(`${"=".repeat(50)}\n`);
 
-  // 7. Build AgentLoop
+  // 7. Signal setup (before subagent/AgentLoop — both need it)
   const sigintController = new AbortController();
   const onSigint = () => {
     console.log("\n^C received — cancelling run...");
@@ -379,6 +416,45 @@ async function main() {
       tokenCounter,
       keepRecentTurns: compactionKeepTurns,
     });
+  }
+
+  // 8. Wire up subagent support (if --subagent flag)
+  if (subagentEnabled) {
+    // Subagent gets its own ScriptedProvider so it doesn't
+    // consume responses meant for the parent agent.
+    let subagentProvider = baseProvider;
+    if (subagentScriptPath) {
+      const rawChildScript = readFileSync(
+        resolve(subagentScriptPath),
+        "utf-8",
+      ).trim();
+      const childScriptLines: ScriptLine[] = rawChildScript
+        .split("\n")
+        .map((l) => JSON.parse(l));
+      const childMessages: Message[] = childScriptLines.map(
+        (s) =>
+          ({
+            role: s.role,
+            content: s.content,
+            toolCalls: s.toolCalls,
+          }) as Message,
+      );
+      subagentProvider = new ScriptedProvider(childMessages);
+    }
+
+    const subagentRuntime = new SubagentRuntime({
+      provider: subagentProvider,
+      journalPath,
+      toolRuntime,
+      permissionRuntime,
+      permissionPolicy,
+      maxDepth: subagentMaxDepth,
+      signal: sigintController.signal,
+    });
+
+    toolRuntime.register(
+      createSubagentTool(subagentRuntime, runId, 0),
+    );
   }
 
   const loop = new AgentLoop(provider, toolRuntime, journal, {

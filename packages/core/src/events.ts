@@ -1,5 +1,5 @@
 export type RunEvent =
-  | { type: "run:start"; runId: string; timestamp: number }
+  | { type: "run:start"; runId: string; timestamp: number; parentRunId?: string | null }
   | { type: "run:end"; runId: string; timestamp: number; exitCode: number }
   | { type: "turn:start"; runId: string; turnIndex: number; timestamp: number }
   | { type: "turn:end"; runId: string; turnIndex: number; timestamp: number }
@@ -77,6 +77,27 @@ export type RunEvent =
       tokensEstimatedAfter: number;
       /** Human-readable summary (optional, only for summarize strategy). */
       summaryText?: string;
+      timestamp: number;
+    }
+  | {
+      type: "subagent:spawn";
+      /** The parent agent's runId. */
+      runId: string;
+      /** The child subagent's runId. */
+      childRunId: string;
+      /** Task description passed to the subagent. */
+      task: string;
+      timestamp: number;
+    }
+  | {
+      type: "subagent:complete";
+      /** The child subagent's runId. */
+      runId: string;
+      parentRunId: string;
+      /** Exit code from the child AgentLoop. */
+      exitCode: number;
+      /** Summary of what the subagent did (tool calls, results, final answer). */
+      summary: string;
       timestamp: number;
     };
 
