@@ -116,19 +116,19 @@ npx tsx demo/pr12-token-counter.ts
 Text                          | Char(4) | cl100k_base | Diff
 ---------------------------------------------------------------------------
 Hello, world!                 |       4 |           4 | =
-function factorial(n) { re... |      16 |          19 | +3
-你好世界                      |       1 |           4 | +3
-console.log("hello");         |       6 |           7 | +1
+function factorial(n) { ret...|      17 |          23 | +6
+你好世界                          |       1 |           2 | +1
+console.log("hello");         |       6 |           5 | -1
 
 === Message Token Count ===
 Conversation (2 messages):
-  CharTokenCounter:   25
-  OpenAITokenCounter: 29
+  CharTokenCounter:   20
+  OpenAITokenCounter: 25
 
 === 中文 Token 计数差异 ===
 Text: 你好世界，这是一个测试。
-  Char(4):       4 (中文每字约 1-2 token)
-  cl100k_base:   14 (实际 token)
+  Char(4):       3 (中文每字约 1-2 token)
+  cl100k_base:   6 (实际 token)
 ```
 
 **看什么：**
