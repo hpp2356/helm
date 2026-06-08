@@ -317,15 +317,31 @@ function hr(): void {
   console.log();
 }
 
-/** Outer width shared by the welcome box and the input frame, so edges align. */
+/** Current terminal width in columns, with a fallback when it's unknown. */
+function termCols(): number {
+  return process.stdout.columns || 80; // 0/undefined → fall back to 80
+}
+
+/**
+ * Width of the welcome card. Kept a tidy, bounded box (capped at 78) rather
+ * than stretching across very wide terminals — like Claude's startup card.
+ */
 function boxOuterWidth(): number {
-  const cols = process.stdout.columns || 80; // 0/undefined → fall back to 80
-  return Math.max(8, Math.min(cols - 1, 78));
+  return Math.max(8, Math.min(termCols() - 1, 78));
+}
+
+/**
+ * Width of the input-frame rules. These fill the terminal (minus one column to
+ * avoid wrapping a full-width rule onto the next row), so the dividers span the
+ * whole window like Claude's.
+ */
+function frameWidth(): number {
+  return Math.max(8, termCols() - 1);
 }
 
 /** A full-width horizontal rule used as the top/bottom edge of the input frame. */
 function frameRule(): string {
-  return DIM + "─".repeat(boxOuterWidth()) + RESET;
+  return DIM + "─".repeat(frameWidth()) + RESET;
 }
 
 /**
