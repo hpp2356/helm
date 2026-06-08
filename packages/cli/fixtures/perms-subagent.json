@@ -1,0 +1,6 @@
+[
+  { "action": "allow", "pattern": "calculator", "riskLevel": "LOW", "description": "arithmetic" },
+  { "action": "allow", "pattern": "weather", "riskLevel": "LOW", "description": "weather" },
+  { "action": "allow", "pattern": "spawn_subagent", "riskLevel": "HIGH", "description": "subagent delegation" },
+  { "action": "allow", "pattern": "read", "riskLevel": "LOW", "description": "read files" }
+]

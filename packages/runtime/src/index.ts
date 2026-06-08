@@ -28,3 +28,5 @@ export { createBashTool, registerBashTool, BASH_TOOL_RISK_LEVEL } from "./bash-t
 export type { BashToolOptions } from "./bash-tool.js";
 export { Compaction } from "./compaction.js";
 export type { CompactionOptions, CompactionStrategy, CompactionResult } from "./compaction.js";
+export { SubagentRuntime, createSubagentTool } from "./subagent-runtime.js";
+export type { SubagentRuntimeOptions, SubagentSpawnArgs, SubagentResult } from "./subagent-runtime.js";

@@ -1,0 +1,2 @@
+{"role":"assistant","content":"Let me read the file.","toolCalls":[{"id":"sc1","name":"read","args":{"filePath":"/tmp/helm-test-file.txt"}}]}
+{"role":"assistant","content":"I've read the file. Here's the content summary."}

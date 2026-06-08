@@ -40,6 +40,11 @@ export interface AgentLoopOptions {
    * is attempted (backward-compatible).
    */
   compaction?: Compaction;
+  /**
+   * Parent runId for subagents. Top-level runs leave this undefined.
+   * When set, the run:start event includes it for run tree reconstruction.
+   */
+  parentRunId?: string | null;
 }
 
 export interface AgentLoopResult {
@@ -119,6 +124,7 @@ export class AgentLoop {
     await this.journal.append({
       type: "run:start",
       runId,
+      parentRunId: this.options.parentRunId ?? null,
       timestamp: Date.now(),
     });
 
