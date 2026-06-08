@@ -366,22 +366,31 @@ const CARET = BOLD + ORANGE + "› " + RESET;
  */
 class InputFrame {
   private active = false;
-  private readonly onKeypress = () => {
-    if (this.active) setImmediate(() => this.paintBottom());
-  };
-  private readonly onResize = () => {
-    if (this.active) this.paintBottom();
+  private repaintQueued = false;
+  // Both keypress and resize repaints are deferred and coalesced. readline runs
+  // its OWN handler for these (reprinting the prompt and moving the cursor); if
+  // we paint synchronously mid-reprint, the save→down→draw lands a row off and
+  // orphans a stray rule fragment. Deferring to a microtask lets readline
+  // settle the cursor on the input row first, and the queue flag collapses a
+  // resize burst into a single paint at the final width.
+  private readonly schedulePaint = () => {
+    if (!this.active || this.repaintQueued) return;
+    this.repaintQueued = true;
+    setImmediate(() => {
+      this.repaintQueued = false;
+      this.paintBottom();
+    });
   };
 
   attach(): void {
     if (!process.stdout.isTTY) return;
-    process.stdin.on("keypress", this.onKeypress);
-    process.stdout.on("resize", this.onResize);
+    process.stdin.on("keypress", this.schedulePaint);
+    process.stdout.on("resize", this.schedulePaint);
   }
 
   detach(): void {
-    process.stdin.off("keypress", this.onKeypress);
-    process.stdout.off("resize", this.onResize);
+    process.stdin.off("keypress", this.schedulePaint);
+    process.stdout.off("resize", this.schedulePaint);
   }
 
   /**
