@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import {
   JsonlJournal,
   RiskLevel,
+  TokenBudget,
   type PermissionPolicy,
   type NonInteractiveStrategy,
 } from "@helm/core";
@@ -13,7 +14,11 @@ import {
   AgentLoop,
   ToolRuntime,
   PermissionRuntime,
+  Compaction,
+  CharTokenCounter,
+  ContextBuilder,
 } from "@helm/runtime";
+import type { CompactionStrategy } from "@helm/runtime";
 
 interface ToolDef {
   name: string;
@@ -72,6 +77,14 @@ async function main() {
   let turnDelayMs = 0;
   let nonInteractive: NonInteractiveStrategy | undefined;
   let riskThreshold: RiskLevel | undefined;
+  let compactionStrategy: CompactionStrategy | undefined;
+  let compactionKeepTurns = 2;
+  let tokenBudgetMax: number | undefined;
+
+  const VALID_COMPACTION_STRATEGIES: CompactionStrategy[] = [
+    "summarize",
+    "truncate",
+  ];
 
   for (const arg of rawArgs) {
     if (arg.startsWith("--non-interactive=")) {
@@ -92,6 +105,33 @@ async function main() {
         process.exit(1);
       }
       riskThreshold = RiskLevel[level as keyof typeof RiskLevel];
+    } else if (arg.startsWith("--compaction=")) {
+      const s = arg.slice("--compaction=".length);
+      if (
+        !(VALID_COMPACTION_STRATEGIES as string[]).includes(s)
+      ) {
+        console.error(
+          `Invalid --compaction value: "${s}". Must be one of: ${VALID_COMPACTION_STRATEGIES.join(", ")}`,
+        );
+        process.exit(1);
+      }
+      compactionStrategy = s as CompactionStrategy;
+    } else if (arg.startsWith("--compaction-keep-turns=")) {
+      const v = Number(arg.slice("--compaction-keep-turns=".length));
+      if (!Number.isInteger(v) || v < 1) {
+        console.error(
+          `Invalid --compaction-keep-turns value: ${arg}. Must be an integer >= 1.`,
+        );
+        process.exit(1);
+      }
+      compactionKeepTurns = v;
+    } else if (arg.startsWith("--token-budget=")) {
+      const v = Number(arg.slice("--token-budget=".length));
+      if (!Number.isFinite(v) || v <= 0) {
+        console.error(`Invalid --token-budget value: ${arg}`);
+        process.exit(1);
+      }
+      tokenBudgetMax = v;
     } else if (arg.startsWith("--timeout=")) {
       const v = Number(arg.slice("--timeout=".length));
       if (!Number.isFinite(v) || v <= 0) {
@@ -132,6 +172,15 @@ async function main() {
     );
     console.error(
       "  --risk-threshold=<LOW|MEDIUM|HIGH|CRITICAL>   (for risk-threshold strategy)",
+    );
+    console.error(
+      "  --compaction=<summarize|truncate>              (enable smart compaction)",
+    );
+    console.error(
+      "  --compaction-keep-turns=<n>                   (recent turns to keep, default: 2)",
+    );
+    console.error(
+      "  --token-budget=<n>                            (token budget for compaction trigger)",
     );
     console.error("  --timeout=<ms>");
     console.error("  --turn-delay-ms=<ms>");
@@ -259,6 +308,11 @@ async function main() {
       case "run:cancelled":
         console.log(`🛑 [${ts}] CANCELLED    reason=${event.reason}`);
         break;
+      case "compaction":
+        console.log(
+          `🗜️  [${ts}] COMPACTION    strategy=${event.strategy} msgs ${event.messageCountBefore}→${event.messageCountAfter} tokens ${event.tokensEstimatedBefore}→${event.tokensEstimatedAfter}`,
+        );
+        break;
       case "run:end":
         console.log(`✅ [${ts}] RUN END      exitCode=${event.exitCode}`);
         break;
@@ -267,9 +321,16 @@ async function main() {
   };
 
   // 6. Run!
-  const modeLabel = nonInteractive
-    ? `non-interactive (${nonInteractive}${riskThreshold ? `, threshold=${riskThreshold}` : ""})`
-    : "interactive";
+  const modeLabel = [
+    nonInteractive
+      ? `non-interactive (${nonInteractive}${riskThreshold ? `, threshold=${riskThreshold}` : ""})`
+      : "interactive",
+    compactionStrategy
+      ? `compaction=${compactionStrategy}, keep=${compactionKeepTurns}, budget=${tokenBudgetMax ?? 4096}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
   console.log(`\n${"=".repeat(50)}`);
   console.log(`Helm CLI — runId: ${runId}`);
   console.log(
@@ -280,6 +341,7 @@ async function main() {
   console.log(`Journal: ${journalPath}`);
   console.log(`${"=".repeat(50)}\n`);
 
+  // 7. Build AgentLoop
   const sigintController = new AbortController();
   const onSigint = () => {
     console.log("\n^C received — cancelling run...");
@@ -287,10 +349,31 @@ async function main() {
   };
   process.on("SIGINT", onSigint);
 
+  let tokenBudget: TokenBudget | undefined;
+  let compaction: Compaction | undefined;
+  let contextBuilder: ContextBuilder | undefined;
+
+  if (compactionStrategy) {
+    const tokenCounter = new CharTokenCounter();
+    contextBuilder = new ContextBuilder(tokenCounter);
+    const budgetMax = tokenBudgetMax ?? 4096;
+
+    tokenBudget = new TokenBudget(budgetMax);
+    compaction = new Compaction({
+      strategy: compactionStrategy,
+      provider: compactionStrategy === "summarize" ? baseProvider : undefined,
+      tokenCounter,
+      keepRecentTurns: compactionKeepTurns,
+    });
+  }
+
   const loop = new AgentLoop(provider, toolRuntime, journal, {
     maxTurns: 10,
     signal: sigintController.signal,
     maxDurationMs: timeoutMs,
+    tokenBudget,
+    contextBuilder,
+    compaction,
   });
   const result = await loop.run(runId, "User request (script-driven)");
 

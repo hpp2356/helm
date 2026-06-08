@@ -1,0 +1,8 @@
+{"role":"assistant","content":"Turn 0.","toolCalls":[{"id":"t0","name":"calculator","args":{"expression":"1+1"}}]}
+{"role":"assistant","content":"Turn 1.","toolCalls":[{"id":"t1","name":"weather","args":{"city":"a"}}]}
+{"role":"assistant","content":"Turn 2.","toolCalls":[{"id":"t2","name":"calculator","args":{"expression":"2+2"}}]}
+{"role":"assistant","content":"Turn 3.","toolCalls":[{"id":"t3","name":"weather","args":{"city":"b"}}]}
+{"role":"assistant","content":"Turn 4.","toolCalls":[{"id":"t4","name":"calculator","args":{"expression":"3+3"}}]}
+{"role":"assistant","content":"Turn 5.","toolCalls":[{"id":"t5","name":"weather","args":{"city":"c"}}]}
+{"role":"assistant","content":"Turn 6.","toolCalls":[{"id":"t6","name":"calculator","args":{"expression":"4+4"}}]}
+{"role":"assistant","content":"Final."}

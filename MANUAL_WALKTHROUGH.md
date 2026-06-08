@@ -1,6 +1,6 @@
-# Helm 手动走查 (PR13)
+# Helm 手动走查 (PR14)
 
-## PR13 — CLI Non-Interactive Mode
+## PR14 — Smart Compaction
 
 ### 前置条件
 
@@ -10,37 +10,27 @@ pnpm install
 pnpm build
 ```
 
-无需 API Key。所有场景用 ScriptedProvider 驱动，不依赖真实 LLM。
+无需 API Key。所有场景用 ScriptedProvider 驱动。
 
 ### 新增/修改文件一览
 
 ```
 packages/core/src/
-├── permission.ts              # +PermissionPolicy, PermissionCheckOptions, riskAtOrBelow()
-├── tool.ts                    # +riskLevel 可选字段
-├── events.ts                  # +permission:allowed, permission:denied 事件
-└── index.ts                   # 导出新类型
-
+├── events.ts                  # +compaction 事件类型
 packages/runtime/src/
-├── permission-runtime.ts      # check() 接受可选 PermissionCheckOptions
-├── permission-runtime.test.ts # +9 个 policy 测试
-├── tool-runtime.ts            # +PermissionPolicy, checkPermission() 公开方法
-├── agent-loop.ts              # +permission 事件 journal, +permissionDenied 跟踪
-├── agent-loop.test.ts         # +5 个 permission 集成测试
-├── bash-tool.ts               # +riskLevel: CRITICAL
-├── file-tools.ts              # +riskLevel 到所有 5 个文件工具
-
+├── compaction.ts              # 新：Compaction 模块（~330 行）
+├── compaction.test.ts         # 新：12 个测试
+├── agent-loop.ts              # +compaction 集成（触发、journal、budget 重置）
+├── agent-loop.test.ts         # +5 个 compaction 集成测试
+└── index.ts                   # 导出 Compaction 及类型
 packages/cli/
-├── bin/run.ts                 # +--non-interactive, --risk-threshold flag 解析
-├── bin/run.test.ts            # 重写，14 个测试覆盖所有模式
+├── bin/run.ts                 # +--compaction, --compaction-keep-turns, --token-budget flags
 └── fixtures/
-    ├── tools.json             # +riskLevel
-    ├── tools-risked.json      # 新：含 LOW/CRITICAL 风险等级
-    ├── script-mixed.jsonl     # 新：同时调用 LOW + CRITICAL 工具
-    └── perms-empty.json       # 新：空权限列表
+    ├── script-long.jsonl      # 新：长脚本（8 个 response）
+    └── script-compaction.jsonl
 ```
 
-### Walkthrough 1: Baseline — 不加 flag 的正常交互行为
+### Walkthrough 1: Baseline — 短会话不触发压缩
 
 ```bash
 node packages/cli/dist/bin/run.js \
@@ -59,256 +49,183 @@ Tools: 2, Script: 2, Perms: 2, Mode: interactive
 Journal: /tmp/helm-walk-baseline.jsonl
 ==================================================
 
-🚀 [03:32:15] RUN START    id=walk-baseline
-🔄 [03:32:15] TURN 0 START
-🔧 [03:32:15] TOOL CALL    calculator({"expression":"2+3"})
-✅ [03:32:15] PERM ALLOW   calculator
-📤 [03:32:15] TOOL RESULT  ["expression=2+3"]
-🔄 [03:32:15] TURN 1 START
-✅ [03:32:15] RUN END      exitCode=0
-
-Done. Journal → /tmp/helm-walk-baseline.jsonl
+🚀 [08:05:06] RUN START    id=walk-baseline
+🔄 [08:05:06] TURN 0 START
+🔧 [08:05:06] TOOL CALL    calculator({"expression":"2+3"})
+✅ [08:05:06] PERM ALLOW   calculator
+📤 [08:05:06] TOOL RESULT  ["expression=2+3"]
+🔄 [08:05:06] TURN 1 START
+✅ [08:05:06] RUN END      exitCode=0
 ```
 
 **看什么：**
 
-- `Mode: interactive` — 不加 flag 时默认行为不变（backward-compatible）。
-- `PERM ALLOW` — calculator 在 `perms.json` 的 allowlist 中，权限检查通过。
-- `exitCode=0` — 正常退出。
-- `EXIT: 0` — `echo $?` 返回 0。
+- 未传 `--compaction` 时行为不变（backward-compatible）。
+- 短会话跑完，无 compaction 事件。
 
 ---
 
-### Walkthrough 2: `--non-interactive=auto-approve` — 所有工具自动通过
+### Walkthrough 2: 长会话触发压缩 — truncate 策略
 
 ```bash
 node packages/cli/dist/bin/run.js \
   packages/cli/fixtures/tools.json \
-  packages/cli/fixtures/script.jsonl \
-  packages/cli/fixtures/perms-empty.json \
-  walk-auto-approve \
-  --non-interactive=auto-approve
+  packages/cli/fixtures/script-long.jsonl \
+  packages/cli/fixtures/perms.json \
+  walk-truncate \
+  --compaction=truncate \
+  --token-budget=1000
 ```
 
-**终端输出：**
+**终端输出（截取关键部分）：**
 
 ```
 ==================================================
-Helm CLI — runId: walk-auto-approve
-Tools: 2, Script: 2, Perms: 0, Mode: non-interactive (auto-approve)
-Journal: /tmp/helm-walk-auto-approve.jsonl
+Helm CLI — runId: walk-truncate
+Tools: 2, Script: 8, Perms: 2, Mode: interactive, compaction=truncate, keep=2, budget=1000
+Journal: /tmp/helm-walk-truncate.jsonl
 ==================================================
 
-🚀 [03:32:19] RUN START    id=walk-auto-approve
-🔄 [03:32:19] TURN 0 START
-🔧 [03:32:19] TOOL CALL    calculator({"expression":"2+3"})
-✅ [03:32:19] PERM ALLOW   calculator
-📤 [03:32:19] TOOL RESULT  ["expression=2+3"]
-🔄 [03:32:19] TURN 1 START
-✅ [03:32:19] RUN END      exitCode=0
+🚀 [08:04:56] RUN START    id=walk-truncate
+🔄 [08:04:56] TURN 0 START
+🔧 [08:04:56] TOOL CALL    calculator({"expression":"1+1"})
+✅ [08:04:56] PERM ALLOW   calculator
+📤 [08:04:56] TOOL RESULT  ["expression=1+1"]
 
-Done. Journal → /tmp/helm-walk-auto-approve.jsonl
+  ... (turns 1-6: more calculator + weather calls) ...
+
+🔄 [08:04:56] TURN 7 START
+🗜️  [08:04:56] COMPACTION    strategy=truncate msgs 15→6 tokens 186→116
+✅ [08:04:56] RUN END      exitCode=0
+
 EXIT: 0
 ```
 
-**Journal (`/tmp/helm-walk-auto-approve.jsonl`)：**
+**Journal（compaction 事件）：**
 
 ```jsonl
-{"type":"run:start","runId":"walk-auto-approve","timestamp":1780889539167}
-{"type":"turn:start","runId":"walk-auto-approve","turnIndex":0,"timestamp":1780889539168}
-{"type":"tool:call","runId":"walk-auto-approve","turnIndex":0,"toolName":"calculator","args":{"expression":"2+3"},"timestamp":1780889539169}
-{"type":"permission:allowed","runId":"walk-auto-approve","turnIndex":0,"toolName":"calculator","timestamp":1780889539169}
-{"type":"tool:result","runId":"walk-auto-approve","turnIndex":0,"toolName":"calculator","output":"[\"expression=2+3\"]","timestamp":1780889539169}
-{"type":"turn:start","runId":"walk-auto-approve","turnIndex":1,"timestamp":1780889539169}
-{"type":"run:end","runId":"walk-auto-approve","timestamp":1780889539169,"exitCode":0}
+{"type":"compaction","runId":"walk-truncate","turnIndex":7,"strategy":"truncate","messageCountBefore":15,"messageCountAfter":6,"tokensEstimatedBefore":186,"tokensEstimatedAfter":116,"timestamp":1780905896380}
 ```
 
 **看什么：**
 
-- `Perms: 0` — 空权限文件，没有 allowlist/denylist 规则。但因为 `auto-approve` 策略，所有工具自动通过。
-- `permission:allowed` 事件出现在 journal 中——AgentLoop 在 execute 之前先做权限检查并记录。
-- `exitCode=0` — 没有被拒的权限，正常退出。
+- 7 个 turn 正常执行，每个 tool call 都有对应的 `PERM ALLOW` + `TOOL RESULT`。
+- Turn 7 开始时 `TokenBudget.isWarning()` 返回 true → 触发 compaction。
+- **compaction event：** `msgs 15→6`（消息减少 60%），`tokens 186→116`（token 减少 38%）。
+- Agent 继续工作，正常结束（exitCode 0）。
+- `strategy: truncate` — 旧 turn 被截断，最近 2 turn 保留。
 
 ---
 
-### Walkthrough 3: `--non-interactive=auto-deny` — 工具被拒 + exit code 2
+### Walkthrough 3: 压缩后 agent 继续工作
 
 ```bash
-node packages/cli/dist/bin/run.js \
-  packages/cli/fixtures/tools.json \
-  packages/cli/fixtures/script.jsonl \
-  packages/cli/fixtures/perms-empty.json \
-  walk-auto-deny \
-  --non-interactive=auto-deny
+grep 'tool:call' /tmp/helm-walk-truncate.jsonl
 ```
 
-**终端输出：**
+输出：
 
 ```
-==================================================
-Helm CLI — runId: walk-auto-deny
-Tools: 2, Script: 2, Perms: 0, Mode: non-interactive (auto-deny)
-Journal: /tmp/helm-walk-auto-deny.jsonl
-==================================================
-
-🚀 [03:32:19] RUN START    id=walk-auto-deny
-🔄 [03:32:19] TURN 0 START
-🔧 [03:32:19] TOOL CALL    calculator({"expression":"2+3"})
-⛔ [03:32:19] PERM DENY    calculator — Tool "calculator" auto-denied (non-interactive: auto-deny)
-⛔ [03:32:19] TOOL RESULT  Error: permission denied — Tool "calculator" auto-denied (non-interactive: auto-...
-🔄 [03:32:19] TURN 1 START
-✅ [03:32:19] RUN END      exitCode=0
-
-Done. Journal → /tmp/helm-walk-auto-deny.jsonl
-EXIT: 2
-```
-
-**Journal (`/tmp/helm-walk-auto-deny.jsonl`)：**
-
-```jsonl
-{"type":"run:start","runId":"walk-auto-deny","timestamp":1780889539875}
-{"type":"turn:start","runId":"walk-auto-deny","turnIndex":0,"timestamp":1780889539876}
-{"type":"tool:call","runId":"walk-auto-deny","turnIndex":0,"toolName":"calculator","args":{"expression":"2+3"},"timestamp":1780889539876}
-{"type":"permission:denied","runId":"walk-auto-deny","turnIndex":0,"toolName":"calculator","reason":"Tool \"calculator\" auto-denied (non-interactive: auto-deny)","timestamp":1780889539876}
-{"type":"tool:result","runId":"walk-auto-deny","turnIndex":0,"toolName":"calculator","output":"Error: permission denied — Tool \"calculator\" auto-denied (non-interactive: auto-deny)","timestamp":1780889539876}
-{"type":"turn:start","runId":"walk-auto-deny","turnIndex":1,"timestamp":1780889539877}
-{"type":"run:end","runId":"walk-auto-deny","timestamp":1780889539877,"exitCode":0}
+{"type":"tool:call","runId":"walk-truncate","turnIndex":0,"toolName":"calculator","args":{"expression":"1+1"},...}
+{"type":"tool:call","runId":"walk-truncate","turnIndex":1,"toolName":"weather","args":{"city":"a"},...}
+{"type":"tool:call","runId":"walk-truncate","turnIndex":2,"toolName":"calculator","args":{"expression":"2+2"},...}
+{"type":"tool:call","runId":"walk-truncate","turnIndex":3,"toolName":"weather","args":{"city":"b"},...}
+{"type":"tool:call","runId":"walk-truncate","turnIndex":4,"toolName":"calculator","args":{"expression":"3+3"},...}
+{"type":"tool:call","runId":"walk-truncate","turnIndex":5,"toolName":"weather","args":{"city":"c"},...}
+{"type":"tool:call","runId":"walk-truncate","turnIndex":6,"toolName":"calculator","args":{"expression":"4+4"},...}
 ```
 
 **看什么：**
 
-- `⛔ PERM DENY` — 所有工具被 auto-deny 策略拒绝。
-- `permission:denied` 事件在 journal 中，包含 `reason` 字段说明原因。
-- Agent 收到 error 后进入下一轮 turn，没有工具可调就直接结束——**不 hang**。
-- `EXIT: 2` — `process.exit(2)` 表示有权限被拒。区别于 exit 0（成功）和 exit 1（fatal error）。
+- 7 个 tool call 全部正常执行 — compaction 在 turn 7 trigger 但不中断 agent。
+- 每个 tool:call 都有对应的 tool:result（journal 里 tool:result 紧随其后）。
+- Compaction 后 agent 拿到 compacted context 继续调用 provider.send()。
 
 ---
 
-### Walkthrough 4: Risk-Threshold — LOW 过了，CRITICAL 被拒
+### Walkthrough 4: 压缩保留 turn 完整性
 
-```bash
-node packages/cli/dist/bin/run.js \
-  packages/cli/fixtures/tools-risked.json \
-  packages/cli/fixtures/script-mixed.jsonl \
-  packages/cli/fixtures/perms-empty.json \
-  walk-risk-threshold \
-  --non-interactive=risk-threshold \
-  --risk-threshold=MEDIUM
-```
+truncate 策略压缩后的消息列表结构：
 
-**终端输出：**
+```typescript
+// Before compaction (5 turns, ~11 messages):
+// [user, asst(T0,toolCalls), tool(T0), asst(T1,toolCalls), tool(T1),
+//  asst(T2,toolCalls), tool(T2), asst(T3,toolCalls), tool(T3),
+//  asst(T4,toolCalls), tool(T4)]
 
-```
-==================================================
-Helm CLI — runId: walk-risk-threshold
-Tools: 3, Script: 2, Perms: 0, Mode: non-interactive (risk-threshold, threshold=MEDIUM)
-Journal: /tmp/helm-walk-risk-threshold.jsonl
-==================================================
-
-🚀 [03:32:20] RUN START    id=walk-risk-threshold
-🔄 [03:32:20] TURN 0 START
-🔧 [03:32:20] TOOL CALL    calculator({"expression":"2+3"})
-✅ [03:32:20] PERM ALLOW   calculator
-📤 [03:32:20] TOOL RESULT  ["expression=2+3"]
-🔧 [03:32:20] TOOL CALL    danger({"target":"/etc"})
-⛔ [03:32:20] PERM DENY    danger — Tool "danger" auto-denied (risk CRITICAL exceeds threshold MEDIUM)
-⛔ [03:32:20] TOOL RESULT  Error: permission denied — Tool "danger" auto-denied (risk CRITICAL exceeds thre...
-🔄 [03:32:20] TURN 1 START
-✅ [03:32:20] RUN END      exitCode=0
-
-Done. Journal → /tmp/helm-walk-risk-threshold.jsonl
-EXIT: 2
-```
-
-**Journal (`/tmp/helm-walk-risk-threshold.jsonl`)：**
-
-```jsonl
-{"type":"run:start","runId":"walk-risk-threshold","timestamp":1780889540672}
-{"type":"turn:start","runId":"walk-risk-threshold","turnIndex":0,"timestamp":1780889540673}
-{"type":"tool:call","runId":"walk-risk-threshold","turnIndex":0,"toolName":"calculator","args":{"expression":"2+3"},"timestamp":1780889540673}
-{"type":"permission:allowed","runId":"walk-risk-threshold","turnIndex":0,"toolName":"calculator","timestamp":1780889540673}
-{"type":"tool:result","runId":"walk-risk-threshold","turnIndex":0,"toolName":"calculator","output":"[\"expression=2+3\"]","timestamp":1780889540674}
-{"type":"tool:call","runId":"walk-risk-threshold","turnIndex":0,"toolName":"danger","args":{"target":"/etc"},"timestamp":1780889540674}
-{"type":"permission:denied","runId":"walk-risk-threshold","turnIndex":0,"toolName":"danger","reason":"Tool \"danger\" auto-denied (risk CRITICAL exceeds threshold MEDIUM)","timestamp":1780889540674}
-{"type":"tool:result","runId":"walk-risk-threshold","turnIndex":0,"toolName":"danger","output":"Error: permission denied — Tool \"danger\" auto-denied (risk CRITICAL exceeds threshold MEDIUM)","timestamp":1780889540674}
-{"type":"turn:start","runId":"walk-risk-threshold","turnIndex":1,"timestamp":1780889540674}
-{"type":"run:end","runId":"walk-risk-threshold","timestamp":1780889540674,"exitCode":0}
+// After truncation (keepRecentTurns=2):
+// [user, "[Earlier conversation truncated — 2 recent turns kept.]",
+//  asst(T3,toolCalls), tool(T3), asst(T4,toolCalls), tool(T4)]
 ```
 
 **看什么：**
 
-- **同一轮 turn 内两种结果：**
-  - `calculator` (riskLevel: LOW) ≤ MEDIUM threshold → `permission:allowed` → 工具正常执行。
-  - `danger` (riskLevel: CRITICAL) > MEDIUM threshold → `permission:denied` → 工具被拒。
-- Journal 中同一个 `turnIndex: 0` 下，既有 `permission:allowed` 又有 `permission:denied`。
-- Deny reason 明确写了 `risk CRITICAL exceeds threshold MEDIUM`。
-- `EXIT: 2` — 因为至少有一个 permission denied。
+- Turn 边界对齐：每个 turn（asst + its tool results）作为整体被保留或压缩。
+- 不会出现 tool result 在 compacted 区但 asst message 在 recent 区的情况。
+- 初始 user message 始终保留。
+- System prompt + tool defs 不在消息列表中（通过 ContextBuilder 单独传递），不受压缩影响。
 
 ---
 
 ### Architecture
 
 ```
-CLI (run.ts)
-  │  parse --non-interactive=<strategy>
-  │  parse --risk-threshold=<level>
-  │  create PermissionPolicy
-  ▼
-ToolRuntime(permissionRuntime, permissionPolicy)
-  │  checkPermission() → PermissionRuntime.check(name, args, opts)
-  │    opts: { toolRiskLevel, policy }
-  ▼
-PermissionRuntime.check()
-  ├─ deny rule match?  → DENY (deny-first, policy can't override)
-  ├─ allow rule match? → ALLOW
-  └─ no rule match → consult policy:
-       ├─ auto-approve    → ALLOW
-       ├─ auto-deny       → DENY
-       └─ risk-threshold  → ALLOW if toolRisk ≤ threshold, else DENY
+AgentLoop.run()
   │
-  ▼
-AgentLoop
-  ├─ journal permission:allowed / permission:denied
-  ├─ skip tool execution on deny
-  └─ track permissionDenied flag
+  ├─ turn:start
+  ├─ Budget check
+  │    ├─ tokenBudget.isWarning() && !wasCompacted?
+  │    │    YES → Compaction.compact(messages, tools, signal)
+  │    │    │
+  │    │    ├─ splitIntoTurns(messages)
+  │    │    ├─ Keep: user msg + last N turns
+  │    │    ├─ Compress: middle turns
+  │    │    │    ├─ "summarize" → Provider.send(summaryPrompt)
+  │    │    │    └─ "truncate" → drop middle, insert note
+  │    │    ├─ journal: compaction event
+  │    │    └─ tokenBudget.reset()
+  │    │
+  │    └─ window.estimatedTokens > remaining?
+  │         YES → EXHAUSTED
+  │         NO  → consume(window.estimatedTokens)
   │
-  ▼
-CLI
-  └─ permissionDenied? → process.exit(2)
+  ├─ Provider.send(messages, signal)
+  ├─ Tool execution
+  └─ (loop)
 ```
 
 **关键设计决策：**
 
-1. **Policy 是 fallback，不是 override。** 显式 deny 规则始终生效（deny-first），显式 allow 规则也始终生效。Policy 只在无规则匹配时介入。这保证了 `--non-interactive=auto-approve` 不会绕过显式 deny。
-2. **RiskLevel 在 Tool 上定义。** 每个 Tool 有可选的 `riskLevel` 字段，ToolRuntime 在执行时传递给 PermissionRuntime。未知 risk level 的工具被视为 CRITICAL（保守默认）。
-3. **AgentLoop 负责 journal 权限事件。** `checkPermission()` 是 ToolRuntime 的公开方法，AgentLoop 在 execute 之前调用它来记录决策。权限检查本身仍然在 PermissionRuntime 中完成（决策源不变，只是从 human 变 policy）。
-4. **Exit code 2 表示权限被拒。** 区别于 exit 0（成功）和 exit 1（fatal error），便于 CI/脚本判断。
-
-### 事件类型速查 (PR13 新增)
-
-| 事件                  | 来源       | 说明                                       |
-| --------------------- | ---------- | ------------------------------------------ |
-| `permission:allowed`  | AgentLoop  | 权限检查通过（每 tool call 一次）            |
-| `permission:denied`   | AgentLoop  | 权限被拒，含 reason 字段                    |
-
-已有事件不变：`run:start`, `turn:start`, `tool:call`, `tool:result`, `error`, `retry`, `run:cancelled`, `run:end`。
+1. **Compaction 是独立模块（`compaction.ts`）。** AgentLoop 组合它，不硬编码压缩逻辑。
+2. **Turn 边界对齐。** `splitIntoTurns()` 按 assistant message 分组 tool call/result，确保要么全保留要么全压缩。
+3. **Compaction 只触发一次。** `wasCompacted` 标记防止重复压缩。Budget 重置给 agent 新空间。
+4. **Budget 跟踪准确。** 压缩前估原始 context；压缩后 reset + re-consume compacted context。
+5. **Summarize fallback。** summarize 策略失败时自动降级为 truncate，不崩溃。
+6. **System prompt + tool defs 不受压缩影响。** 通过 ContextBuilder 单独传递。
 
 ### CLI Flag 速查
 
 | Flag | 值 | 说明 |
 | ---- | --- | --- |
-| `--non-interactive` | `auto-approve` | 无匹配规则时自动允许 |
-| `--non-interactive` | `auto-deny` | 无匹配规则时自动拒绝 |
-| `--non-interactive` | `risk-threshold` | 基于风险等级阈值决策 |
-| `--risk-threshold` | `LOW`, `MEDIUM`, `HIGH`, `CRITICAL` | 配合 risk-threshold 使用，默认 MEDIUM |
+| `--compaction` | `truncate` | 删除旧 turn，保留最近 N turn |
+| `--compaction` | `summarize` | 用 Provider 生成摘要替换旧 turn |
+| `--compaction-keep-turns` | `<n>` | 保留最近 N 个 turn（默认 2） |
+| `--token-budget` | `<n>` | token budget 上限（默认 4096） |
+
+### 事件类型速查 (PR14 新增)
+
+| 事件 | 来源 | 说明 |
+| ---- | ---- | --- |
+| `compaction` | AgentLoop | strategy, messageCountBefore/After, tokensEstimatedBefore/After, summaryText? |
 
 ### Java 类比
 
-| 概念                     | Java 世界                                    |
-| ------------------------ | -------------------------------------------- |
-| PermissionPolicy         | `enum NonInteractiveMode { AUTO_APPROVE, AUTO_DENY, RISK_THRESHOLD }` |
-| riskAtOrBelow()          | `RiskLevel.compareTo(threshold) <= 0`         |
-| PermissionCheckOptions   | `record CheckOpts(RiskLevel toolRisk, Policy policy) {}` |
-| checkPermission()        | `public Optional<Decision> checkPermission(...)` |
-| permission:allowed event | Journal DTO `PermissionAllowedEvent`           |
-| EXIT_PERMISSION_DENIED   | `public static final int EXIT_PERM_DENIED = 2;` |
+| 概念 | Java 世界 |
+| ---- | --------- |
+| Compaction class | `@Component class MessageCompactor` |
+| splitIntoTurns() | `MessageHistory.groupByTurnBoundaries()` |
+| CompactionStrategy | `enum Strategy { SUMMARIZE, TRUNCATE }` |
+| Provider.send for summary | `llmProvider.call(summarizePrompt)` |
+| wasCompacted flag | `private boolean alreadyCompacted` |
+| TokenBudget.reset() | `budget.resetConsumed(packedContextTokens)` |
+| compaction journal event | `JournalEvent.builder().type("compaction")...` |

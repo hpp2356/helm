@@ -60,6 +60,24 @@ export type RunEvent =
       toolName: string;
       reason: string;
       timestamp: number;
+    }
+  | {
+      type: "compaction";
+      runId: string;
+      turnIndex: number;
+      /** The strategy used to compact. */
+      strategy: "summarize" | "truncate";
+      /** Number of messages before compaction. */
+      messageCountBefore: number;
+      /** Number of messages after compaction. */
+      messageCountAfter: number;
+      /** Estimated tokens before compaction. */
+      tokensEstimatedBefore: number;
+      /** Estimated tokens after compaction. */
+      tokensEstimatedAfter: number;
+      /** Human-readable summary (optional, only for summarize strategy). */
+      summaryText?: string;
+      timestamp: number;
     };
 
 export function eventToString(event: RunEvent): string {

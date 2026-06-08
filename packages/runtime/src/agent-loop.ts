@@ -8,6 +8,7 @@ import {
 } from "./retry.js";
 import { ContextBuilder, toToolDefs } from "./context-builder.js";
 import { CharTokenCounter } from "./token-counter.js";
+import { type Compaction } from "./compaction.js";
 
 export interface AgentLoopOptions {
   maxTurns: number;
@@ -33,6 +34,12 @@ export interface AgentLoopOptions {
    * with 4 chars/token if omitted but tokenBudget is provided.
    */
   contextBuilder?: ContextBuilder;
+  /**
+   * Compaction module for compressing message history when the token
+   * budget reaches its warning threshold. When omitted, no compaction
+   * is attempted (backward-compatible).
+   */
+  compaction?: Compaction;
 }
 
 export interface AgentLoopResult {
@@ -139,6 +146,7 @@ export class AgentLoop {
 
     let exitCode = EXIT_OK;
     let permissionDenied = false;
+    let wasCompacted = false;
     let cancelled: { reason: "external" | "timeout" } | undefined;
 
     try {
@@ -161,9 +169,55 @@ export class AgentLoop {
           const cb =
             this.options.contextBuilder ??
             new ContextBuilder(new CharTokenCounter());
+          const toolDefs = toToolDefs(this.toolRuntime.list());
+
+          // ── Compaction trigger ────────────────────────────────────
+          // Compact when: budget is at warning level, compaction is
+          // configured, and we haven't already compacted in this run.
+          if (
+            this.options.compaction &&
+            this.options.tokenBudget.isWarning() &&
+            !wasCompacted
+          ) {
+            const windowBefore = cb.build({
+              messages: messages as Parameters<ContextBuilder["build"]>[0]["messages"],
+              toolDefs,
+            });
+
+            const result = await this.options.compaction.compact(
+              messages as Parameters<Compaction["compact"]>[0],
+              this.toolRuntime.list(),
+              controller.signal,
+            );
+
+            if (result.didCompact) {
+              // Replace the message list with the compacted version
+              messages.length = 0;
+              messages.push(...(result.messages as typeof messages));
+
+              wasCompacted = true;
+
+              await this.journal.append({
+                type: "compaction",
+                runId,
+                turnIndex,
+                strategy: this.options.compaction!.strategy,
+                messageCountBefore: result.messageCountBefore,
+                messageCountAfter: result.messageCountAfter,
+                tokensEstimatedBefore: result.tokensEstimatedBefore,
+                tokensEstimatedAfter: result.tokensEstimatedAfter,
+                summaryText: result.summaryText,
+                timestamp: Date.now(),
+              });
+
+              // Reset budget to reflect the compacted state
+              this.options.tokenBudget.reset();
+            }
+          }
+
           const window = cb.build({
             messages: messages as Parameters<ContextBuilder["build"]>[0]["messages"],
-            toolDefs: toToolDefs(this.toolRuntime.list()),
+            toolDefs,
           });
           if (window.estimatedTokens > this.options.tokenBudget.remainingTokens) {
             await this.journal.append({

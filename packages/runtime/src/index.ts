@@ -26,3 +26,5 @@ export { BashSafety } from "./bash-safety.js";
 export type { BashSafetyResult } from "./bash-safety.js";
 export { createBashTool, registerBashTool, BASH_TOOL_RISK_LEVEL } from "./bash-tool.js";
 export type { BashToolOptions } from "./bash-tool.js";
+export { Compaction } from "./compaction.js";
+export type { CompactionOptions, CompactionStrategy, CompactionResult } from "./compaction.js";
