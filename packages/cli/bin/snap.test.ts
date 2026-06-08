@@ -68,3 +68,45 @@ describe("sanitize", () => {
     expect(result.summary).toContain("250");
   });
 });
+
+describe("TurnStateMachine", () => {
+  it("starts idle", async () => {
+    const { TurnStateMachine } = await import("../src/state-machine.js");
+    const sm = new TurnStateMachine();
+    expect(sm.state).toBe("idle");
+  });
+
+  it("transitions idle → sending → running → completed → idle", async () => {
+    const { TurnStateMachine } = await import("../src/state-machine.js");
+    const sm = new TurnStateMachine();
+    sm.send("sending"); expect(sm.state).toBe("sending");
+    sm.send("running"); expect(sm.state).toBe("running");
+    sm.send("completed"); expect(sm.state).toBe("completed");
+    sm.send("idle"); expect(sm.state).toBe("idle");
+  });
+
+  it("rejects invalid transitions", async () => {
+    const { TurnStateMachine } = await import("../src/state-machine.js");
+    const sm = new TurnStateMachine();
+    expect(() => sm.send("running")).toThrow();
+  });
+
+  it("notifies listeners on state change", async () => {
+    const { TurnStateMachine } = await import("../src/state-machine.js");
+    const sm = new TurnStateMachine();
+    const events: string[] = [];
+    sm.on("change", (s) => events.push(s));
+    sm.send("sending");
+    sm.send("running");
+    expect(events).toEqual(["sending", "running"]);
+  });
+
+  it("queued replaces previous pending input", async () => {
+    const { TurnStateMachine } = await import("../src/state-machine.js");
+    const sm = new TurnStateMachine();
+    sm.send("sending");
+    sm.enqueue("first");
+    sm.enqueue("second");
+    expect(sm.pendingInput).toBe("second");
+  });
+});
