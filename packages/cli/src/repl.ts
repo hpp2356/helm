@@ -46,6 +46,11 @@ export interface ReplConfig {
   tokenBudgetMax?: number;
   /** Max turns per AgentLoop run. */
   maxTurns: number;
+  /**
+   * System prompt. null = no system message.
+   * undefined = default (auto-derived from providerName).
+   */
+  systemPrompt?: string | null;
   /** Config file path (if loaded). */
   configPath?: string;
 }
@@ -229,14 +234,17 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   });
 
   // ── REPL state ─────────────────────────────────────────────────────
-  const INITIAL_SYSTEM = {
-    role: "system",
-    content:
-      "You are Helm, an AI assistant powered by DeepSeek. " +
-      "You are helpful, concise, and honest. " +
-      "You can use tools to read files, write code, and execute commands.",
-  };
-  let messageHistory: MessageRecord[] = [INITIAL_SYSTEM];
+  const SYSTEM_MESSAGE: MessageRecord | null =
+    config.systemPrompt !== undefined
+      ? config.systemPrompt === null
+        ? null
+        : { role: "system", content: config.systemPrompt }
+      : // Default when not specified: derive from provider name
+        { role: "system", content: `You are Helm, an AI assistant powered by ${config.providerName}. You are helpful, concise, and honest.` };
+
+  let messageHistory: MessageRecord[] = SYSTEM_MESSAGE
+    ? [SYSTEM_MESSAGE]
+    : [];
   let turnCount = 0;
 
   console.log(WELCOME);
@@ -283,7 +291,7 @@ export async function startRepl(config: ReplConfig): Promise<void> {
         }
 
         case "/clear":
-          messageHistory = [{ ...INITIAL_SYSTEM }];
+          messageHistory = SYSTEM_MESSAGE ? [{ ...SYSTEM_MESSAGE }] : [];
           turnCount = 0;
           console.log("✔ Conversation history cleared.");
           rl.prompt();

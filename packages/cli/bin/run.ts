@@ -79,6 +79,8 @@ interface HelmSettings {
   model?: string;
   /** API key inline. */
   apiKey?: string;
+  /** System prompt. null = no system message. Omit = auto-derived. */
+  systemPrompt?: string | null;
   tools?: string;
   perms?: string;
   workspace?: string;
@@ -128,14 +130,23 @@ function parseReplArgs(
   compactionKeepTurns: number;
   tokenBudgetMax?: number;
   maxTurns: number;
+  systemPrompt?: string | null;
 } {
   // Apply config file first, CLI flags override
   let providerKind: "scripted" | "deepseek" = base.provider ?? "scripted";
   let model: string | undefined = base.model;
   let apiKey: string | undefined = base.apiKey;
+  let systemPrompt: string | null | undefined = base.systemPrompt;
   let toolsPath: string | undefined = base.tools;
   let permsPath: string | undefined = base.perms;
   let workspaceRoot: string | undefined = base.workspace;
+
+  // --system-prompt flag override
+  for (const arg of args) {
+    if (arg.startsWith("--system-prompt=")) {
+      systemPrompt = arg.slice("--system-prompt=".length);
+    }
+  }
   let nonInteractive: NonInteractiveStrategy | undefined;
   let riskThreshold: RiskLevel | undefined;
   let compaction: CompactionStrategy | undefined = base.compaction;
@@ -220,6 +231,7 @@ function parseReplArgs(
     compactionKeepTurns,
     tokenBudgetMax,
     maxTurns,
+    systemPrompt,
   };
 }
 
@@ -306,6 +318,7 @@ async function main() {
       compactionKeepTurns: parsed.compactionKeepTurns,
       tokenBudgetMax: parsed.tokenBudgetMax,
       maxTurns: parsed.maxTurns,
+      systemPrompt: parsed.systemPrompt,
     });
   }
 
