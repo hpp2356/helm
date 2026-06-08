@@ -29,7 +29,8 @@ operator-kits/
 
 # OS/editor
 .DS_Store
-.idea/
+.idea/*
+!.idea/runConfigurations/
 .vscode/settings.json
 
 # Debug logs

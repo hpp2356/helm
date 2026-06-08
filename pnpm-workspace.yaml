@@ -4,3 +4,8 @@ packages:
   - 'packages/eval'
   - 'packages/replay'
   - 'packages/cli'
+  - 'packages/provider-deepseek'
+allowBuilds:
+  esbuild: true
+minimumReleaseAgeExclude:
+  - openai@6.42.0
