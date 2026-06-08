@@ -286,12 +286,11 @@ async function main() {
         const OpenAIC = (mod as Record<string, unknown>)
           .OpenAICompatibleProvider as new (opts: Record<string, unknown>) => Provider;
         providerName = parsed.model ?? "deepseek-v4-flash";
+        // Note: no onText sink — the REPL buffers the full reply and renders
+        // Markdown (with a ● bullet) once the turn completes, Claude-style.
         replProvider = new OpenAIC({
           apiKey,
           model: providerName,
-          onText: (text: string) => {
-            process.stdout.write(text);
-          },
         });
       } catch {
         console.error(

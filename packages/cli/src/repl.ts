@@ -51,6 +51,60 @@ interface PermRule {
 const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";
 const DIM = "\x1b[2m";
+const ITALIC = "\x1b[3m";
+const PINK = "\x1b[38;5;211m"; // mascot + section headers
+const ORANGE = "\x1b[38;5;215m"; // box border
+
+/** Whimsical past-tense verbs for the post-turn timing footer (Claude-style). */
+const WORK_VERBS = [
+  "Cooked",
+  "Baked",
+  "Brewed",
+  "Simmered",
+  "Forged",
+  "Conjured",
+  "Pondered",
+  "Mulled",
+  "Crafted",
+  "Whipped up",
+];
+
+/** Animated star glyphs for the in-progress spinner. */
+const SPIN_FRAMES = ["✶", "✷", "✸", "✹", "✺", "✹", "✸", "✷"];
+
+/** Whimsical gerunds shown next to the spinner while a turn runs. */
+const SPIN_VERBS = [
+  "Razzmatazzing",
+  "Conjuring",
+  "Percolating",
+  "Marinating",
+  "Noodling",
+  "Tinkering",
+  "Finagling",
+  "Cogitating",
+  "Simmering",
+  "Hustling",
+];
+
+/** Rotating tips shown under the spinner (Helm-specific, not Claude's). */
+const SPIN_TIPS = [
+  "Press Ctrl-C to interrupt the current turn",
+  "Type /help for the full command list",
+  "/clear wipes the conversation and starts fresh",
+  "/mode switches the permission strategy on the fly",
+  "Every turn is journaled — replay it from /tmp later",
+  "/stats shows messages, turns, and the journal path",
+];
+
+/** Visible length of a string, ignoring ANSI escape codes. */
+function visLen(s: string): number {
+  return s.replace(/\x1b\[[0-9;]*m/g, "").length;
+}
+
+/** Right-pad a string to a visible width (ANSI-aware). */
+function padVis(s: string, width: number): string {
+  return s + " ".repeat(Math.max(0, width - visLen(s)));
+}
 
 /** Minimal ANSI Markdown renderer for terminal display. */
 function renderMd(text: string): string {
@@ -152,12 +206,101 @@ function renderMd(text: string): string {
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
-const WELCOME = `
-${BOLD}Helm${RESET} — AI Assistant
-Type ${DIM}/help${RESET} for commands, ${DIM}/exit${RESET} to quit.
-`;
-
 const HELM_HISTORY_FILE = `${process.env.HOME || "~"}/.helm_history`;
+
+/** CLI version, read from the package manifest (best-effort). */
+function helmVersion(): string {
+  // Compiled to dist/src/repl.js, so the manifest is two levels up; source
+  // layout puts it one level up. Try both.
+  for (const rel of ["../../package.json", "../package.json"]) {
+    try {
+      const pkg = new URL(rel, import.meta.url);
+      const v = JSON.parse(readFileSync(pkg, "utf-8")).version;
+      if (v) return v;
+    } catch {
+      // try next candidate
+    }
+  }
+  return "0.0.0";
+}
+
+/** Truncate to a visible width, appending an ellipsis when shortened. */
+function truncVis(s: string, width: number): string {
+  if (visLen(s) <= width) return s;
+  // Walk codepoints, copying ANSI escapes verbatim, until we hit width-1.
+  let out = "";
+  let vis = 0;
+  let i = 0;
+  while (i < s.length && vis < width - 1) {
+    const esc = s.slice(i).match(/^\x1b\[[0-9;]*m/);
+    if (esc) {
+      out += esc[0];
+      i += esc[0].length;
+      continue;
+    }
+    out += s[i];
+    vis++;
+    i++;
+  }
+  return out + RESET + "…";
+}
+
+/** Small pixel-art mascot, rendered in pink like Claude's. */
+const MASCOT = ["  ▐▛▀▜▌  ", "  ▐▌◣◢▐▌ ", "  ▝▜▄▟▘  "];
+
+/**
+ * Render a Claude-style rounded welcome box with the title embedded in the
+ * top border, a two-column body (mascot + greeting | tips) split by a vertical
+ * divider, and a footer line for the working directory.
+ */
+function renderWelcomeBox(opts: {
+  title: string;
+  greeting: string;
+  cwd: string;
+  tips: string[];
+}): string {
+  const width = boxOuterWidth();
+  const inner = width - 2; // space between the two vertical borders
+
+  // Left column holds the mascot + greeting; right column holds the tips.
+  const leftW = 22;
+  const gapW = 3; // " │ "
+  const rightW = inner - leftW - gapW;
+
+  const left: string[] = [
+    "",
+    ...MASCOT.map((m) => PINK + padVis(m, 9) + RESET),
+    "",
+    `   ${BOLD}${opts.greeting}${RESET}`,
+    "",
+  ];
+  const right: string[] = [`${BOLD}${PINK}Session${RESET}`, ...opts.tips];
+
+  const rows = Math.max(left.length, right.length);
+  const lines: string[] = [];
+
+  // Top border with embedded title: ╭─ Helm vX ──────╮
+  const titleSeg = `─ ${BOLD}${opts.title}${RESET}${ORANGE} `;
+  const dashes = inner - visLen(titleSeg);
+  lines.push(
+    ORANGE + "╭" + titleSeg + "─".repeat(Math.max(0, dashes)) + "╮" + RESET,
+  );
+
+  for (let r = 0; r < rows; r++) {
+    const l = padVis(truncVis(left[r] ?? "", leftW), leftW);
+    const sep = DIM + "│" + RESET;
+    const rt = padVis(truncVis(right[r] ?? "", rightW), rightW);
+    lines.push(
+      ORANGE + "│" + RESET + " " + l + " " + sep + " " + rt + ORANGE + "│" + RESET,
+    );
+  }
+
+  lines.push(ORANGE + "╰" + "─".repeat(inner) + "╯" + RESET);
+  lines.push("");
+  lines.push(DIM + opts.cwd + RESET);
+
+  return lines.join("\n");
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -169,10 +312,132 @@ function loadJson<T>(path: string): T {
   return JSON.parse(readFileSync(fullPath, "utf-8")) as T;
 }
 
-/** Print a horizontal rule to visually separate content from prompt. */
+/** Blank-line separator between a turn's output and the next prompt. */
 function hr(): void {
+  console.log();
+}
+
+/** Outer width shared by the welcome box and the input box, so edges align. */
+function boxOuterWidth(): number {
   const cols = process.stdout.columns ?? 80;
-  console.log("\n" + DIM + "─".repeat(cols) + RESET);
+  return Math.min(cols - 1, 78);
+}
+
+/** Inner width (between the vertical borders) of the input box. */
+function boxInnerWidth(): number {
+  return Math.max(8, boxOuterWidth() - 2);
+}
+
+/**
+ * The readline prompt string for the input box: a top border, then the left
+ * border + `›` caret on the next line. readline rewrites only this last row as
+ * the user types, so the top border survives editing.
+ */
+function boxedPrompt(): string {
+  const top = DIM + "╭" + "─".repeat(boxInnerWidth()) + "╮" + RESET;
+  return top + "\n" + DIM + "│" + RESET + " " + BOLD + ORANGE + "›" + RESET + " ";
+}
+
+/** Bottom border of the input box, printed once a line is submitted. */
+function closeBox(): void {
+  console.log(DIM + "╰" + "─".repeat(boxInnerWidth()) + "╯" + RESET);
+}
+
+/**
+ * Render an assistant reply Claude-style: a `●` bullet on the first line, the
+ * Markdown-rendered body, and continuation lines indented to align under it.
+ */
+function renderReply(content: string): string {
+  const body = renderMd(content.trim());
+  const lines = body.split("\n");
+  const out = lines.map((l, idx) =>
+    idx === 0 ? `${BOLD}●${RESET} ${l}` : `  ${l}`,
+  );
+  return out.join("\n");
+}
+
+/** Dim `✻ <verb> for Ns` footer shown after each completed turn. */
+function renderTimingFooter(ms: number, verb: string): string {
+  const secs = Math.max(1, Math.round(ms / 1000));
+  return DIM + `✻ ${verb} for ${secs}s` + RESET;
+}
+
+/**
+ * A two-line in-progress indicator shown while a turn runs: an animated star
+ * with a whimsical gerund, and a dim `└ Tip:` line beneath it. Clears itself
+ * (erasing both lines) when the turn completes, so the reply renders in place.
+ */
+class Spinner {
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private frame = 0;
+  private readonly verb: string;
+  private readonly tip: string;
+  private drawn = false;
+
+  constructor(verb: string, tip: string) {
+    this.verb = verb;
+    this.tip = tip;
+  }
+
+  start(): void {
+    if (!process.stdout.isTTY) return; // no animation when piped
+    this.render();
+    this.timer = setInterval(() => {
+      this.frame = (this.frame + 1) % SPIN_FRAMES.length;
+      this.redraw();
+    }, 120);
+    // Don't let the interval keep the event loop alive on its own.
+    this.timer.unref?.();
+  }
+
+  private render(): void {
+    const star = SPIN_FRAMES[this.frame]!;
+    process.stdout.write(PINK + star + RESET + " " + DIM + this.verb + "…" + RESET + "\n");
+    process.stdout.write(DIM + "  └ Tip: " + this.tip + RESET + "\n");
+    this.drawn = true;
+  }
+
+  private redraw(): void {
+    if (!this.drawn) return;
+    // Move up two lines, clear from cursor down, re-render.
+    process.stdout.write("\x1b[2A\x1b[0J");
+    this.render();
+  }
+
+  stop(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    if (this.drawn && process.stdout.isTTY) {
+      // Erase the two spinner lines so the reply takes their place.
+      process.stdout.write("\x1b[2A\x1b[0J");
+      this.drawn = false;
+    }
+  }
+
+  /** Print a line above the spinner (e.g. tool output), then redraw it. */
+  printAbove(line: string): void {
+    if (this.drawn && process.stdout.isTTY) {
+      process.stdout.write("\x1b[2A\x1b[0J");
+      console.log(line);
+      this.render();
+    } else {
+      console.log(line);
+    }
+  }
+}
+
+/** The spinner for the turn currently in flight, if any. */
+let activeSpinner: Spinner | null = null;
+
+/** Print a line, routing above the active spinner when one is running. */
+function emit(line: string): void {
+  if (activeSpinner) {
+    activeSpinner.printAbove(line);
+  } else {
+    console.log(line);
+  }
 }
 
 // ── REPL ───────────────────────────────────────────────────────────────────
@@ -274,27 +539,27 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     const e = event as Record<string, unknown>;
     switch (e.type) {
       case "tool:call":
-        console.log(DIM + `  ⚙ ${e.toolName}` + RESET);
+        emit(DIM + `  ⚙ ${e.toolName}` + RESET);
         break;
       case "tool:result": {
         const out = String(e.output ?? "");
         const preview = out.length > 120 ? out.slice(0, 120) + "..." : out;
         const icon = out.startsWith("Error:") ? "✗" : "✓";
-        console.log(DIM + `  ${icon} ${preview}` + RESET);
+        emit(DIM + `  ${icon} ${preview}` + RESET);
         break;
       }
       case "compaction":
-        console.log(
+        emit(
           DIM +
             `  🗜  Compaction: msgs ${e.messageCountBefore}→${e.messageCountAfter}` +
             RESET,
         );
         break;
       case "error":
-        console.log(`  ✗ ${e.message}`);
+        emit(`  ✗ ${e.message}`);
         break;
       case "run:cancelled":
-        console.log(DIM + `  ⏹ Cancelled: ${e.reason}` + RESET);
+        emit(DIM + `  ⏹ Cancelled: ${e.reason}` + RESET);
         break;
     }
     await originalAppend(event);
@@ -338,21 +603,34 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   let turnCount = 0;
 
   // ── Startup display ─────────────────────────────────────────────────
-  console.log(WELCOME);
-  const toolNames = toolRuntime.getToolNames();
-  console.log(
-    DIM +
-      `${config.providerName}` +
-      (toolNames.length > 0 ? `  ·  ${toolNames.length} tools` : "") +
-      (config.configPath ? `  ·  ${config.configPath}` : "") +
-      RESET,
-  );
-  console.log(
-    DIM + `Journal: ${journalPath}` + RESET,
-  );
+  const home = process.env.HOME ?? "";
+  const tilde = (p: string): string =>
+    home && p.startsWith(home) ? "~" + p.slice(home.length) : p;
 
-  hr();
-  rl.setPrompt("> ");
+  const toolNames = toolRuntime.getToolNames();
+  const tips: string[] = [
+    `${DIM}Provider${RESET}  ${config.providerName}`,
+    `${DIM}Tools${RESET}     ${toolNames.length}`,
+  ];
+  if (config.configPath) {
+    tips.push(`${DIM}Config${RESET}    ${tilde(config.configPath)}`);
+  }
+  tips.push(`${DIM}Journal${RESET}   ${tilde(journalPath)}`);
+  tips.push("");
+  tips.push(`${ITALIC}${DIM}/help for commands${RESET}`);
+
+  console.log();
+  console.log(
+    renderWelcomeBox({
+      title: `Helm v${helmVersion()}`,
+      greeting: "Welcome back!",
+      cwd: tilde(process.cwd()),
+      tips,
+    }),
+  );
+  console.log();
+
+  rl.setPrompt(boxedPrompt());
   rl.prompt();
 
   // ── Input handler ──────────────────────────────────────────────────
@@ -454,10 +732,18 @@ Session stats:
     const prevSigint = process.listeners("SIGINT");
     process.removeAllListeners("SIGINT");
     process.once("SIGINT", () => {
+      activeSpinner?.stop();
       console.log("\n" + DIM + "Interrupted." + RESET);
       turnController.abort();
     });
 
+    const turnStart = Date.now();
+    const spinner = new Spinner(
+      SPIN_VERBS[(turnCount - 1) % SPIN_VERBS.length]!,
+      SPIN_TIPS[(turnCount - 1) % SPIN_TIPS.length]!,
+    );
+    activeSpinner = spinner;
+    spinner.start();
     try {
       const loop = new AgentLoop(provider, toolRuntime, journal, {
         maxTurns: config.maxTurns ?? 10,
@@ -469,24 +755,25 @@ Session stats:
 
       const result = await loop.run(turnRunId, trimmed, messageHistory);
 
+      spinner.stop();
+      activeSpinner = null;
+
       if (result.cancelled) {
         console.log(DIM + `(Turn cancelled: ${result.cancelled.reason})` + RESET);
       }
 
-      // Print assistant text with markdown rendering
+      // Render the assistant reply with a ● bullet and Markdown body, then a
+      // dim timing footer — Claude-style. The full reply is buffered (no raw
+      // stream echo), so **bold**, lists, and code fences render properly.
       const lastMessage = result.messages[result.messages.length - 1];
-      if (lastMessage && lastMessage.role === "assistant" && lastMessage.content) {
-        const isStreaming =
-          (provider as unknown as Record<string, unknown>).onText !==
-            undefined &&
-          (provider as unknown as Record<string, unknown>).onText !== null;
-        if (!isStreaming) {
-          // Scripted provider — render markdown then print
-          console.log("\n" + renderMd(lastMessage.content));
-        } else {
-          // Streamed provider — text already printed via onText, just newline
-          console.log();
-        }
+      if (
+        lastMessage &&
+        lastMessage.role === "assistant" &&
+        lastMessage.content
+      ) {
+        console.log("\n" + renderReply(lastMessage.content) + "\n");
+        const verb = WORK_VERBS[(turnCount - 1) % WORK_VERBS.length]!;
+        console.log(renderTimingFooter(Date.now() - turnStart, verb));
       }
 
       messageHistory = result.messages;
@@ -495,6 +782,9 @@ Session stats:
         `  ✗ Error: ${err instanceof Error ? err.message : String(err)}`,
       );
     } finally {
+      // Idempotent: clears the animation if any path skipped the stop above.
+      spinner.stop();
+      activeSpinner = null;
       process.removeAllListeners("SIGINT");
       for (const listener of prevSigint) {
         process.on("SIGINT", listener);
@@ -507,6 +797,9 @@ Session stats:
 
   // ── Readline event handlers ────────────────────────────────────────
   rl.on("line", (line) => {
+    // Close the input box (bottom border) the moment a line is submitted, so
+    // every downstream path renders below a complete frame.
+    closeBox();
     processInput(line).catch((err) => {
       console.error(`REPL error: ${err.message}`);
       hr();

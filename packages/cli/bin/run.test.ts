@@ -416,9 +416,10 @@ describe("CLI REPL (helm repl)", () => {
 
   it("starts REPL and displays welcome banner", () => {
     const { stdout } = runRepl("/exit\n");
-    expect(stdout).toContain("AI Assistant");
+    expect(stdout).toContain("Helm v");
+    expect(stdout).toContain("Welcome back!");
     expect(stdout).toContain("/help");
-    expect(stdout).toContain("Journal:");
+    expect(stdout).toContain("Journal");
   });
 
   it("handles /help command", () => {
