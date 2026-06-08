@@ -60,6 +60,11 @@ describe("sanitize", () => {
     expect(isBinary(Buffer.from("hello world"))).toBe(false);
   });
 
+  it("strips private mode sequences like cursor hide", async () => {
+    const { sanitize } = await import("../src/sanitize.js");
+    expect(sanitize("\x1b[?25hhello\x1b[?25l")).toBe("hello");
+  });
+
   it("summarizes large output", async () => {
     const { collapseOutput } = await import("../src/sanitize.js");
     const lines = Array.from({ length: 250 }, (_, i) => `line ${i}`);

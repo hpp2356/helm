@@ -1,6 +1,6 @@
 // packages/cli/src/editor.ts
 import { spawnSync } from "node:child_process";
-import { writeFileSync, readFileSync, unlinkSync, mkdtempSync } from "node:fs";
+import { writeFileSync, readFileSync, unlinkSync, mkdtempSync, rmdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Interface as ReadlineInterface } from "node:readline";
@@ -51,7 +51,7 @@ export function openExternalEditor(deps: EditorDeps): boolean {
     content = readFileSync(tmpFile, "utf-8");
     unlinkSync(tmpFile);
   } catch { /* ignore */ }
-  try { unlinkSync(tmpDir); } catch { /* ignore */ }
+  try { rmdirSync(tmpDir); } catch { /* ignore */ }
 
   // 7. Put content back into readline buffer
   deps.rl.line = content.replace(/\n$/, "");

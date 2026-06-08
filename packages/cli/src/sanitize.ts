@@ -13,6 +13,8 @@ const STRIP_PATTERNS = [
   /\x1b\[\?2004[hl]/g,
   // OSC sequences: ESC]...BEL or ESC]...ST
   /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g,
+  // Private mode sequences ESC[?<n>h/l (cursor hide/show, etc.)
+  /\x1b\[\?[\d;]*[hl]/g,
   // Other ESC[ sequences that don't end in 'm' (non-SGR)
   /\x1b\[[\d;]*[^m\d;]/g,
 ];

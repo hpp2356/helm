@@ -14,7 +14,7 @@ type Transition = TurnState;
 
 const TRANSITIONS: Record<TurnState, TurnState[]> = {
   idle:             ["sending", "queued"],
-  queued:           ["sending"],
+  queued:           ["sending", "idle"],
   sending:          ["running", "failed", "cancelling"],
   running:          ["waiting_approval", "cancelling", "failed", "completed"],
   waiting_approval: ["running", "cancelling"],

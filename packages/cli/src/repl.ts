@@ -31,7 +31,7 @@ import { theme } from "./theme.js";
 import { InputFrame } from "./input-frame.js";
 import { renderStatusBar } from "./status-bar.js";
 import { sanitize, isBinary, collapseOutput } from "./sanitize.js";
-import { TurnStateMachine } from "./state-machine.js";
+import { TurnStateMachine, type TurnState } from "./state-machine.js";
 import {
   renderAssistantCard,
   renderToolCard,
@@ -563,7 +563,8 @@ export async function startRepl(config: ReplConfig): Promise<void> {
 
       const result = await loop.run(`${runId}-t${turnCount}`, trimmed, messageHistory);
       spinner.stop(); activeSpinner = null;
-      sm.send("completed");
+      const stateAfterRun = sm.state as TurnState;
+      if (stateAfterRun === "running") sm.send("completed");
 
       if (result.cancelled) {
         emit(theme.dim(`(Turn cancelled: ${result.cancelled.reason})`));
@@ -581,10 +582,11 @@ export async function startRepl(config: ReplConfig): Promise<void> {
       statusState.turnStart = 0;
     } catch (err) {
       spinner.stop(); activeSpinner = null;
-      sm.send("failed");
+      const stateOnError = sm.state as TurnState;
+      if (stateOnError === "running" || stateOnError === "sending") sm.send("failed");
       emit(renderErrorCard(err instanceof Error ? err.message : String(err), theme));
     } finally {
-      sm.send("idle");
+      if (sm.state !== "idle") sm.send("idle");
       process.removeAllListeners("SIGINT");
       for (const listener of prevSigint) process.on("SIGINT", listener);
     }
