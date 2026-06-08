@@ -220,26 +220,24 @@ let statusState: StatusState = {
 let statusTimer: ReturnType<typeof setInterval> | null = null;
 let statusPaused = false;
 
-function paintStatusBar(): void {
+function printStatusBar(): void {
   if (statusPaused || !process.stdout.isTTY) return;
-  // During a turn the spinner owns the scrollback; the cursor is NOT at the
-  // composer bottom rule, so \x1b[2A would land on the wrong row.  Only paint
-  // when we are at the prompt (spinner not running).
-  if (activeSpinner !== null) return;
   const cols = termCols();
   const bar = renderStatusBar({ theme, cols, ...statusState });
-  // Status bar sits above Composer top rule: save → up 2 → col 0 → clear line → draw → restore
-  process.stdout.write("\x1b7\x1b[2A\r\x1b[2K" + bar + "\x1b8");
+  // Print the status bar as a regular scrollback line immediately before the
+  // Composer frame. In-place overwriting via cursor repositioning is unreliable
+  // in a scrolling REPL because the cursor is never at a known absolute row.
+  process.stdout.write(bar + "\n");
 }
 
+// paintStatusBar is a no-op alias kept so journal-interceptor call sites compile
+// without changes; reprompt() is the only place that actually prints the bar.
+function paintStatusBar(): void { /* intentionally empty — bar is printed in reprompt() */ }
+
 function startStatusTimer(): void {
-  if (statusTimer) return;
-  statusTimer = setInterval(() => {
-    if (statusState.turnStart > 0) statusState.durationMs = Date.now() - statusState.turnStart;
-    // paintStatusBar already guards against activeSpinner !== null
-    paintStatusBar();
-  }, 1000);
-  statusTimer.unref?.();
+  // No-op: in scrolling-REPL mode the status bar is re-printed on each reprompt,
+  // so a 1-second timer that tries to overwrite it would corrupt the scrollback.
+  // Keep the function so call sites don't break.
 }
 
 function stopStatusTimer(): void {
@@ -360,9 +358,8 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   rl.setPrompt(theme.bold(theme.accent("› ")));
 
   const reprompt = (): void => {
+    printStatusBar();
     frame.open(() => rl.prompt());
-    startStatusTimer();
-    paintStatusBar();
   };
 
   // ── Ctrl+X Ctrl+E chord state ─────────────────────────────────────────
@@ -451,7 +448,7 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   tips.push(theme.italic(theme.dim("/help for commands")));
   console.log();
   console.log(renderWelcomeBox({ title: `Helm v${helmVersion()}`, greeting: "Welcome back!", cwd: tilde(process.cwd()), tips }));
-  console.log();
+  console.log();  // blank line between welcome box and first status bar
   reprompt();
 
   // ── Slash command registry ────────────────────────────────────────────
