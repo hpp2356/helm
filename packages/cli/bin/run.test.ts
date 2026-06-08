@@ -416,9 +416,9 @@ describe("CLI REPL (helm repl)", () => {
 
   it("starts REPL and displays welcome banner", () => {
     const { stdout } = runRepl("/exit\n");
-    expect(stdout).toContain("Helm REPL");
+    expect(stdout).toContain("AI Assistant");
     expect(stdout).toContain("/help");
-    expect(stdout).toContain("Provider:");
+    expect(stdout).toContain("Journal:");
   });
 
   it("handles /help command", () => {
@@ -456,7 +456,7 @@ describe("CLI REPL (helm repl)", () => {
     );
     expect(status).toBe(0);
     // AgentLoop runs: should see at minimum no crash
-    expect(stdout).toContain("Helm REPL");
+    expect(stdout).toContain("Helm");
   });
 
   it("processes multiple turns without crash", () => {
@@ -479,7 +479,7 @@ describe("CLI REPL (helm repl)", () => {
       ],
     );
     expect(status).toBe(0);
-    expect(stdout).toContain("Helm REPL");
+    expect(stdout).toContain("Helm");
   });
 
   it("writes journal on exit", async () => {
@@ -490,7 +490,9 @@ describe("CLI REPL (helm repl)", () => {
     );
 
     // Extract journal path from output
-    const match = stdout.match(/Journal → (\/tmp\/helm-repl-[^\s]+)/);
+    const match = stdout.match(
+      /Journal → (\/tmp\/helm-repl-\d+\.jsonl)/,
+    );
     if (match) {
       const journalPath = match[1]!;
       expect(existsSync(journalPath)).toBe(true);
@@ -504,7 +506,7 @@ describe("CLI REPL (helm repl)", () => {
       timeout: 10000,
       maxBuffer: 1024 * 1024,
     });
-    expect(result.stdout ?? "").toContain("Helm REPL");
+    expect(result.stdout ?? "").toContain("Helm");
   });
 
   it("Ctrl-C during turn does not exit REPL", () => {

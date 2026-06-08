@@ -24,34 +24,18 @@ import type { Provider } from "@helm/core";
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export interface ReplConfig {
-  /** Pre-built provider instance. */
   provider: Provider;
-  /** Display name for the provider. */
   providerName: string;
-  /** Path to tools JSON file. */
   toolsPath?: string;
-  /** Path to permissions JSON file. */
   permsPath?: string;
-  /** Workspace root for file tools. */
   workspaceRoot?: string;
-  /** Non-interactive permission strategy. */
   nonInteractive?: NonInteractiveStrategy;
-  /** Risk threshold for risk-threshold strategy. */
   riskThreshold?: RiskLevel;
-  /** Compaction strategy. */
   compaction?: CompactionStrategy;
-  /** Number of recent turns to keep in compaction. */
   compactionKeepTurns: number;
-  /** Token budget max for compaction trigger. */
   tokenBudgetMax?: number;
-  /** Max turns per AgentLoop run. */
   maxTurns: number;
-  /**
-   * System prompt. null = no system message.
-   * undefined = default (auto-derived from providerName).
-   */
   systemPrompt?: string | null;
-  /** Config file path (if loaded). */
   configPath?: string;
 }
 
@@ -62,17 +46,116 @@ interface PermRule {
   description: string;
 }
 
+// ── ANSI helpers ──────────────────────────────────────────────────────────
+
+const RESET = "\x1b[0m";
+const BOLD = "\x1b[1m";
+const DIM = "\x1b[2m";
+
+/** Minimal ANSI Markdown renderer for terminal display. */
+function renderMd(text: string): string {
+  let out = "";
+  let i = 0;
+
+  while (i < text.length) {
+    // Code fences
+    if (
+      text.startsWith("```", i) &&
+      (i === 0 || text[i - 1] === "\n")
+    ) {
+      const end = text.indexOf("```", i + 3);
+      if (end !== -1) {
+        const code = text.slice(i + 3, end).replace(/^\n/, "");
+        out += DIM + "  │ " + code.replace(/\n/g, "\n  │ ") + RESET + "\n";
+        i = end + 3;
+        continue;
+      }
+    }
+
+    // Inline code
+    if (text[i] === "`" && text[i + 1] !== "`") {
+      const end = text.indexOf("`", i + 1);
+      if (end !== -1) {
+        out += DIM + text.slice(i + 1, end) + RESET;
+        i = end + 1;
+        continue;
+      }
+    }
+
+    // Bold
+    if (text.startsWith("**")) {
+      const end = text.indexOf("**", i + 2);
+      if (end !== -1) {
+        out += BOLD + text.slice(i + 2, end) + RESET;
+        i = end + 2;
+        continue;
+      }
+    }
+
+    // List marker
+    if (
+      (text[i] === "-" || text[i] === "*") &&
+      (i === 0 || text[i - 1] === "\n") &&
+      text[i + 1] === " "
+    ) {
+      out += "  • ";
+      i += 2;
+      continue;
+    }
+
+    // Numbered list
+    if (
+      /\d/.test(text[i]) &&
+      (i === 0 || text[i - 1] === "\n")
+    ) {
+      const rest = text.slice(i);
+      const m = rest.match(/^(\d+)\.\s/);
+      if (m) {
+        out += `  ${m[1]}. `;
+        i += m[0].length;
+        continue;
+      }
+    }
+
+    // Heading
+    if (text.startsWith("### ")) {
+      i += 4;
+      const end = text.indexOf("\n", i);
+      out +=
+        "\n" +
+        BOLD +
+        (end !== -1 ? text.slice(i, end) : text.slice(i)) +
+        RESET +
+        "\n";
+      i = end !== -1 ? end : text.length;
+      continue;
+    }
+    if (text.startsWith("## ") && !text.startsWith("### ")) {
+      i += 3;
+      const end = text.indexOf("\n", i);
+      out +=
+        "\n" +
+        BOLD +
+        (end !== -1 ? text.slice(i, end) : text.slice(i)) +
+        RESET +
+        "\n";
+      i = end !== -1 ? end : text.length;
+      continue;
+    }
+
+    out += text[i];
+    i++;
+  }
+
+  return out;
+}
+
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const WELCOME = `
-╭─────────────────────────────────────────────────────╮
-│                   Helm REPL                          │
-│  Type your message and press Enter to send.          │
-│  /help    — Show available commands                  │
-│  /clear   — Clear conversation history               │
-│  /exit    — Exit REPL                                │
-│  /stats   — Show session stats                       │
-╰─────────────────────────────────────────────────────╯`;
+${BOLD}Helm${RESET} — AI Assistant
+Type ${DIM}/help${RESET} for commands, ${DIM}/exit${RESET} to quit.
+`;
 
 const HELM_HISTORY_FILE = `${process.env.HOME || "~"}/.helm_history`;
 
@@ -84,6 +167,12 @@ function loadJson<T>(path: string): T {
     throw new Error(`File not found: ${fullPath}`);
   }
   return JSON.parse(readFileSync(fullPath, "utf-8")) as T;
+}
+
+/** Print a horizontal rule to visually separate content from prompt. */
+function hr(): void {
+  const cols = process.stdout.columns ?? 80;
+  console.log("\n" + DIM + "─".repeat(cols) + RESET);
 }
 
 // ── REPL ───────────────────────────────────────────────────────────────────
@@ -150,7 +239,6 @@ export async function startRepl(config: ReplConfig): Promise<void> {
       });
     }
   } else {
-    // Default: built-in file tools
     registerFileTools(toolRuntime, workspaceRoot);
     for (const tool of toolRuntime.list()) {
       permissionRuntime.allow({
@@ -161,7 +249,6 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     }
   }
 
-  // ── Provider (pre-built, passed in by caller) ──────────────────────
   const provider = config.provider;
 
   // ── Compaction ──────────────────────────────────────────────────────
@@ -181,31 +268,33 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     });
   }
 
-  // ── Journal interceptor (compact display for REPL) ─────────────────
+  // ── Journal interceptor ─────────────────────────────────────────────
   const originalAppend = journal.append.bind(journal);
   journal.append = async function (event) {
     const e = event as Record<string, unknown>;
     switch (e.type) {
       case "tool:call":
-        console.log(`  🔧 ${e.toolName}(${JSON.stringify(e.args)})`);
+        console.log(DIM + `  ⚙ ${e.toolName}` + RESET);
         break;
       case "tool:result": {
         const out = String(e.output ?? "");
-        const preview = out.length > 80 ? out.slice(0, 80) + "..." : out;
-        const icon = out.startsWith("Error:") ? "⛔" : "📤";
-        console.log(`  ${icon} ${preview}`);
+        const preview = out.length > 120 ? out.slice(0, 120) + "..." : out;
+        const icon = out.startsWith("Error:") ? "✗" : "✓";
+        console.log(DIM + `  ${icon} ${preview}` + RESET);
         break;
       }
       case "compaction":
         console.log(
-          `  🗜️  Compaction: msgs ${e.messageCountBefore}→${e.messageCountAfter}`,
+          DIM +
+            `  🗜  Compaction: msgs ${e.messageCountBefore}→${e.messageCountAfter}` +
+            RESET,
         );
         break;
       case "error":
-        console.log(`  ❌ ${e.message}`);
+        console.log(`  ✗ ${e.message}`);
         break;
       case "run:cancelled":
-        console.log(`  🛑 Cancelled: ${e.reason}`);
+        console.log(DIM + `  ⏹ Cancelled: ${e.reason}` + RESET);
         break;
     }
     await originalAppend(event);
@@ -229,7 +318,6 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: "\n> ",
     terminal: true,
   });
 
@@ -239,42 +327,44 @@ export async function startRepl(config: ReplConfig): Promise<void> {
       ? config.systemPrompt === null
         ? null
         : { role: "system", content: config.systemPrompt }
-      : // Default when not specified: derive from provider name
-        { role: "system", content: `You are Helm, an AI assistant powered by ${config.providerName}. You are helpful, concise, and honest.` };
+      : {
+          role: "system",
+          content: `You are Helm, an AI assistant powered by ${config.providerName}. You are helpful, concise, and honest.`,
+        };
 
   let messageHistory: MessageRecord[] = SYSTEM_MESSAGE
     ? [SYSTEM_MESSAGE]
     : [];
   let turnCount = 0;
 
+  // ── Startup display ─────────────────────────────────────────────────
   console.log(WELCOME);
-  console.log(`\nProvider: ${config.providerName}`);
-  console.log(`Journal: ${journalPath}`);
   const toolNames = toolRuntime.getToolNames();
   console.log(
-    `Tools: ${toolNames.length > 0 ? toolNames.join(", ") : "none"}`,
+    DIM +
+      `${config.providerName}` +
+      (toolNames.length > 0 ? `  ·  ${toolNames.length} tools` : "") +
+      (config.configPath ? `  ·  ${config.configPath}` : "") +
+      RESET,
   );
-  if (config.nonInteractive) {
-    console.log(`Permission: non-interactive (${config.nonInteractive})`);
-  }
-  if (config.configPath) {
-    console.log(`Config:   ${config.configPath}`);
-  }
+  console.log(
+    DIM + `Journal: ${journalPath}` + RESET,
+  );
 
+  hr();
+  rl.setPrompt("> ");
   rl.prompt();
 
   // ── Input handler ──────────────────────────────────────────────────
   const processInput = async (input: string) => {
     const trimmed = input.trim();
     if (!trimmed) {
+      hr();
       rl.prompt();
       return;
     }
 
-    // Save to history
-    if (trimmed) {
-      historyLines.push(trimmed);
-    }
+    historyLines.push(trimmed);
 
     // ── REPL commands ────────────────────────────────────────────
     if (trimmed.startsWith("/")) {
@@ -285,7 +375,7 @@ export async function startRepl(config: ReplConfig): Promise<void> {
         case "/exit":
         case "/quit":
         case "/q": {
-          console.log("Goodbye.");
+          console.log(BOLD + "Goodbye." + RESET);
           rl.close();
           return;
         }
@@ -293,20 +383,22 @@ export async function startRepl(config: ReplConfig): Promise<void> {
         case "/clear":
           messageHistory = SYSTEM_MESSAGE ? [{ ...SYSTEM_MESSAGE }] : [];
           turnCount = 0;
-          console.log("✔ Conversation history cleared.");
+          console.log(DIM + "Conversation history cleared." + RESET);
+          hr();
           rl.prompt();
           return;
 
         case "/help":
           console.log(`
 Commands:
-  /exit, /quit, /q  — Exit REPL
-  /clear            — Clear conversation history
-  /help             — Show this help
-  /stats            — Show session stats
-  /mode <strategy>  — Switch non-interactive mode (auto-approve|auto-deny|risk-threshold)
+  ${BOLD}/exit, /quit, /q${RESET}  — Exit REPL
+  ${BOLD}/clear${RESET}            — Clear conversation history
+  ${BOLD}/help${RESET}             — Show this help
+  ${BOLD}/stats${RESET}            — Show session stats
+  ${BOLD}/mode <strategy>${RESET}  — Switch non-interactive mode
 
 Press Enter to send. Ctrl-C to interrupt current turn.`);
+          hr();
           rl.prompt();
           return;
 
@@ -317,6 +409,7 @@ Session stats:
   Turns:    ${turnCount}
   Provider: ${config.providerName}
   Journal:  ${journalPath}`);
+          hr();
           rl.prompt();
           return;
 
@@ -333,18 +426,20 @@ Session stats:
               strategy: ni,
               riskThreshold: config.riskThreshold ?? RiskLevel.MEDIUM,
             };
-            console.log(`✔ Permission mode: ${ni}`);
+            console.log(DIM + `Permission mode: ${ni}` + RESET);
           } else {
             console.log(
               "Usage: /mode <auto-approve|auto-deny|risk-threshold>",
             );
           }
+          hr();
           rl.prompt();
           return;
         }
 
         default:
           console.log(`Unknown command: ${cmd}. Type /help for help.`);
+          hr();
           rl.prompt();
           return;
       }
@@ -354,15 +449,14 @@ Session stats:
     turnCount++;
     const turnRunId = `${runId}-t${turnCount}`;
 
-    // Ctrl-C handler for this turn only
+    // Ctrl-C for this turn only
     const turnController = new AbortController();
     const prevSigint = process.listeners("SIGINT");
     process.removeAllListeners("SIGINT");
-    const onTurnSigint = () => {
-      console.log("\n  ⚠ Interrupting...");
+    process.once("SIGINT", () => {
+      console.log("\n" + DIM + "Interrupted." + RESET);
       turnController.abort();
-    };
-    process.once("SIGINT", onTurnSigint);
+    });
 
     try {
       const loop = new AgentLoop(provider, toolRuntime, journal, {
@@ -376,29 +470,29 @@ Session stats:
       const result = await loop.run(turnRunId, trimmed, messageHistory);
 
       if (result.cancelled) {
-        console.log(`  (Turn cancelled: ${result.cancelled.reason})`);
+        console.log(DIM + `(Turn cancelled: ${result.cancelled.reason})` + RESET);
       }
 
-      // Print assistant text if not already streamed
+      // Print assistant text with markdown rendering
       const lastMessage = result.messages[result.messages.length - 1];
       if (lastMessage && lastMessage.role === "assistant" && lastMessage.content) {
-        // For scripted providers (no streaming), print full content.
-        // For streaming providers, text was already printed via onText.
         const isStreaming =
-          (provider as unknown as Record<string, unknown>).onText !== undefined &&
+          (provider as unknown as Record<string, unknown>).onText !==
+            undefined &&
           (provider as unknown as Record<string, unknown>).onText !== null;
         if (!isStreaming) {
-          console.log(`\n${lastMessage.content}`);
+          // Scripted provider — render markdown then print
+          console.log("\n" + renderMd(lastMessage.content));
         } else {
+          // Streamed provider — text already printed via onText, just newline
           console.log();
         }
       }
 
-      // Update message history for next turn
       messageHistory = result.messages;
     } catch (err) {
       console.log(
-        `  ❌ Error: ${err instanceof Error ? err.message : String(err)}`,
+        `  ✗ Error: ${err instanceof Error ? err.message : String(err)}`,
       );
     } finally {
       process.removeAllListeners("SIGINT");
@@ -407,6 +501,7 @@ Session stats:
       }
     }
 
+    hr();
     rl.prompt();
   };
 
@@ -414,12 +509,12 @@ Session stats:
   rl.on("line", (line) => {
     processInput(line).catch((err) => {
       console.error(`REPL error: ${err.message}`);
+      hr();
       rl.prompt();
     });
   });
 
   rl.on("close", () => {
-    // Save history
     try {
       const dir = process.env.HOME ?? "/tmp";
       writeFileSync(
@@ -431,7 +526,7 @@ Session stats:
       // Non-fatal
     }
     journal.close().catch(() => {});
-    console.log(`\nJournal → ${journalPath}`);
+    console.log(DIM + `\nJournal → ${journalPath}` + RESET);
   });
 
   // ── Wait for close ─────────────────────────────────────────────────
