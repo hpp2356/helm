@@ -143,7 +143,78 @@ grep 'tool:call' /tmp/helm-walk-truncate.jsonl
 
 ---
 
-### Walkthrough 4: 压缩保留 turn 完整性
+### Walkthrough 4: `--compaction=summarize` — LLM 生成摘要
+
+```bash
+node packages/cli/dist/bin/run.js \
+  packages/cli/fixtures/tools.json \
+  packages/cli/fixtures/script-long.jsonl \
+  packages/cli/fixtures/perms.json \
+  walk-summarize \
+  --compaction=summarize \
+  --token-budget=1000
+```
+
+**终端输出：**
+
+```
+==================================================
+Helm CLI — runId: walk-summarize
+Tools: 2, Script: 8, Perms: 2, Mode: interactive, compaction=summarize, keep=2, budget=1000
+Journal: /tmp/helm-walk-summarize.jsonl
+==================================================
+
+🚀 [08:14:29] RUN START    id=walk-summarize
+🔄 [08:14:29] TURN 0 START
+🔧 [08:14:29] TOOL CALL    calculator({"expression":"1+1"})
+✅ [08:14:29] PERM ALLOW   calculator
+📤 [08:14:29] TOOL RESULT  ["expression=1+1"]
+
+  ... (turns 1-6: same as truncate walkthrough) ...
+
+🔄 [08:14:29] TURN 7 START
+🗜️  [08:14:29] COMPACTION    strategy=summarize msgs 15→6 tokens 186→142
+✅ [08:14:29] RUN END      exitCode=0
+
+EXIT: 0
+```
+
+**Journal（compaction 事件）：**
+
+```json
+{
+    "type": "compaction",
+    "runId": "walk-summarize",
+    "turnIndex": 7,
+    "strategy": "summarize",
+    "messageCountBefore": 15,
+    "messageCountAfter": 6,
+    "tokensEstimatedBefore": 186,
+    "tokensEstimatedAfter": 142,
+    "summaryText": "[Compaction summary] Previous conversation covered tool calls and their results. The agent completed several tasks successfully."
+}
+```
+
+**和 truncate 的区别：**
+
+| 维度 | truncate | summarize |
+|------|----------|-----------|
+| LLM 调用 | 无 | 有（Provider.send） |
+| 压缩后 token | 116 | 142（摘要比 truncation note 长） |
+| summaryText | 无 | 有，LLM 生成的摘要 |
+| 消息内容 | `[Earlier conversation truncated...]` | `[Previous conversation summary]\n<摘要>` |
+| 适用场景 | 快速、确定、无 LLM 依赖 | 保留语义信息，更长的未来 turn 需要上下文 |
+
+**debug 要点：**
+
+- `strategy: summarize` — 确认用的 LLM 策略而非 truncate。
+- `summaryText` 非空 — 确认 LLM 返回了摘要内容。如果摘要只有 `[Compacted N messages...]` 说明 LLM 调用失败，触发了 fallback。
+- `messageCountAfter` 仍为 6 — 和 truncate 一样只保留 user + summary + 2 recent turns（4 msg）。
+- 生产环境替换 provider：CLI 里 `compactionProvider` 换成真实 `OpenAICompatibleProvider` 即可用 DeepSeek/OpenAI 生成摘要。
+
+---
+
+### Walkthrough 5: 压缩保留 turn 完整性
 
 truncate 策略压缩后的消息列表结构：
 
