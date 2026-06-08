@@ -229,7 +229,14 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   });
 
   // ── REPL state ─────────────────────────────────────────────────────
-  let messageHistory: MessageRecord[] = [];
+  const INITIAL_SYSTEM = {
+    role: "system",
+    content:
+      "You are Helm, an AI assistant powered by DeepSeek. " +
+      "You are helpful, concise, and honest. " +
+      "You can use tools to read files, write code, and execute commands.",
+  };
+  let messageHistory: MessageRecord[] = [INITIAL_SYSTEM];
   let turnCount = 0;
 
   console.log(WELCOME);
@@ -276,7 +283,7 @@ export async function startRepl(config: ReplConfig): Promise<void> {
         }
 
         case "/clear":
-          messageHistory = [];
+          messageHistory = [{ ...INITIAL_SYSTEM }];
           turnCount = 0;
           console.log("✔ Conversation history cleared.");
           rl.prompt();
