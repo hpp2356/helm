@@ -35,7 +35,7 @@ export function detectColorLevel(): ColorLevel {
   const ct = process.env.COLORTERM;
   if (ct === "truecolor" || ct === "24bit") return "truecolor";
   const term = process.env.TERM ?? "";
-  if (term.includes("256color") || ct === "256") return "ansi256";
+  if (term.includes("256color")) return "ansi256";
   if (term) return "ansi16";
   return "no-color";
 }

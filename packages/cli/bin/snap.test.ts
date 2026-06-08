@@ -1,11 +1,12 @@
 // packages/cli/bin/snap.test.ts
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 
 describe("theme", () => {
+  afterEach(() => { vi.resetModules(); });
+
   it("no-color mode returns plain text", async () => {
     const original = process.env.NO_COLOR;
     process.env.NO_COLOR = "1";
-    vi.resetModules();
     const { buildTheme } = await import("../src/theme.js");
     const t = buildTheme();
     expect(t.error("hello")).toBe("hello");
