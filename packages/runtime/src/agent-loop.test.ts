@@ -2,8 +2,10 @@ import { describe, it, expect } from "vitest";
 import { ScriptedProvider } from "./scripted-provider.js";
 import { AgentLoop, type AgentLoopOptions } from "./agent-loop.js";
 import { ToolRuntime } from "./tool-runtime.js";
+import { PermissionRuntime } from "./permission-runtime.js";
 import { type RetryPolicy, DEFAULT_RETRY_POLICY } from "./retry.js";
-import { JsonlJournal, TokenBudget } from "@helm/core";
+import { JsonlJournal, TokenBudget, RiskLevel } from "@helm/core";
+import type { PermissionPolicy } from "@helm/core";
 import { ContextBuilder } from "./context-builder.js";
 import { CharTokenCounter } from "./token-counter.js";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -741,6 +743,306 @@ describe("AgentLoop", () => {
     expect(result.exitCode).toBe(0);
     // Warning should not block execution
     expect(tokenBudget.isWarning()).toBe(false); // small run, well under threshold
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  // ── PR13: Permission journaling tests ─────────────────────────────
+
+  it("journals permission:allowed when tool is allowed", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "helm-test-"));
+    const journalPath = join(dir, "run.jsonl");
+    const journal = new JsonlJournal(journalPath);
+    await journal.open();
+
+    const perm = new PermissionRuntime();
+    perm.allow({ pattern: "echo", riskLevel: RiskLevel.LOW, description: "echo" });
+
+    const toolRuntime = new ToolRuntime(perm);
+    toolRuntime.register({
+      name: "echo",
+      description: "echoes",
+      riskLevel: RiskLevel.LOW,
+      parameters: {},
+      async execute(args: Record<string, unknown>) {
+        return `echo: ${args.text}`;
+      },
+    });
+
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "Let me echo.",
+        toolCalls: [{ id: "tc1", name: "echo", args: { text: "hi" } }],
+      },
+      { role: "assistant", content: "Done." },
+    ]);
+
+    const loop = new AgentLoop(provider, toolRuntime, journal, { maxTurns: 5 });
+    const result = await loop.run("test-perm-allowed", "echo");
+    await journal.close();
+
+    expect(result.permissionDenied).toBe(false);
+
+    const events = (await readFile(journalPath, "utf-8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    const allowed = events.filter((e) => e.type === "permission:allowed");
+    expect(allowed.length).toBe(1);
+    expect(allowed[0].toolName).toBe("echo");
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("journals permission:denied when tool is blocked and sets permissionDenied", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "helm-test-"));
+    const journalPath = join(dir, "run.jsonl");
+    const journal = new JsonlJournal(journalPath);
+    await journal.open();
+
+    const perm = new PermissionRuntime();
+    // No allow rule → default-deny
+
+    const toolRuntime = new ToolRuntime(perm);
+    toolRuntime.register({
+      name: "echo",
+      description: "echoes",
+      riskLevel: RiskLevel.LOW,
+      parameters: {},
+      async execute(args: Record<string, unknown>) {
+        return `echo: ${args.text}`;
+      },
+    });
+
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "Let me echo.",
+        toolCalls: [{ id: "tc1", name: "echo", args: { text: "hi" } }],
+      },
+      { role: "assistant", content: "Blocked, moving on." },
+    ]);
+
+    const loop = new AgentLoop(provider, toolRuntime, journal, { maxTurns: 5 });
+    const result = await loop.run("test-perm-denied", "echo");
+    await journal.close();
+
+    expect(result.permissionDenied).toBe(true);
+
+    const events = (await readFile(journalPath, "utf-8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    const denied = events.filter((e) => e.type === "permission:denied");
+    expect(denied.length).toBe(1);
+    expect(denied[0].toolName).toBe("echo");
+    expect(denied[0].reason).toContain("not in the allowlist");
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("non-interactive auto-approve allows unregistered tool", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "helm-test-"));
+    const journalPath = join(dir, "run.jsonl");
+    const journal = new JsonlJournal(journalPath);
+    await journal.open();
+
+    const perm = new PermissionRuntime();
+    const policy: PermissionPolicy = { strategy: "auto-approve" };
+    const toolRuntime = new ToolRuntime(perm, policy);
+    toolRuntime.register({
+      name: "echo",
+      description: "echoes",
+      riskLevel: RiskLevel.LOW,
+      parameters: {},
+      async execute(args: Record<string, unknown>) {
+        return `echo: ${args.text}`;
+      },
+    });
+
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "Let me echo.",
+        toolCalls: [{ id: "tc1", name: "echo", args: { text: "hi" } }],
+      },
+      { role: "assistant", content: "Done." },
+    ]);
+
+    const loop = new AgentLoop(provider, toolRuntime, journal, { maxTurns: 5 });
+    const result = await loop.run("test-auto-approve", "echo");
+    await journal.close();
+
+    expect(result.permissionDenied).toBe(false);
+
+    const events = (await readFile(journalPath, "utf-8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    expect(events.some((e) => e.type === "permission:allowed")).toBe(true);
+    expect(events.some((e) => e.type === "permission:denied")).toBe(false);
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("risk-threshold policy: LOW tool allowed, CRITICAL tool denied", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "helm-test-"));
+    const journalPath = join(dir, "run.jsonl");
+    const journal = new JsonlJournal(journalPath);
+    await journal.open();
+
+    const perm = new PermissionRuntime();
+    const policy: PermissionPolicy = {
+      strategy: "risk-threshold",
+      riskThreshold: RiskLevel.MEDIUM,
+    };
+    const toolRuntime = new ToolRuntime(perm, policy);
+    toolRuntime.register({
+      name: "read",
+      description: "read files",
+      riskLevel: RiskLevel.LOW,
+      parameters: {},
+      async execute() {
+        return "file content";
+      },
+    });
+    toolRuntime.register({
+      name: "bash",
+      description: "run commands",
+      riskLevel: RiskLevel.CRITICAL,
+      parameters: {},
+      async execute() {
+        return "command output";
+      },
+    });
+
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "Doing things.",
+        toolCalls: [
+          { id: "tc1", name: "read", args: {} },
+          { id: "tc2", name: "bash", args: {} },
+        ],
+      },
+      { role: "assistant", content: "Done." },
+    ]);
+
+    const loop = new AgentLoop(provider, toolRuntime, journal, { maxTurns: 5 });
+    const result = await loop.run("test-risk-threshold", "go");
+    await journal.close();
+
+    // One allowed, one denied
+    const events = (await readFile(journalPath, "utf-8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+
+    const allowed = events.filter((e) => e.type === "permission:allowed");
+    expect(allowed.length).toBe(1);
+    expect(allowed[0].toolName).toBe("read");
+
+    const denied = events.filter((e) => e.type === "permission:denied");
+    expect(denied.length).toBe(1);
+    expect(denied[0].toolName).toBe("bash");
+    expect(denied[0].reason).toContain("exceeds threshold");
+
+    expect(result.permissionDenied).toBe(true);
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("non-interactive auto-deny blocks all when no allowlist", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "helm-test-"));
+    const journalPath = join(dir, "run.jsonl");
+    const journal = new JsonlJournal(journalPath);
+    await journal.open();
+
+    const perm = new PermissionRuntime();
+    const policy: PermissionPolicy = { strategy: "auto-deny" };
+    const toolRuntime = new ToolRuntime(perm, policy);
+    toolRuntime.register({
+      name: "echo",
+      description: "echoes",
+      riskLevel: RiskLevel.LOW,
+      parameters: {},
+      async execute(args: Record<string, unknown>) {
+        return `echo: ${args.text}`;
+      },
+    });
+
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "Let me echo.",
+        toolCalls: [{ id: "tc1", name: "echo", args: { text: "hi" } }],
+      },
+      { role: "assistant", content: "Done." },
+    ]);
+
+    const loop = new AgentLoop(provider, toolRuntime, journal, { maxTurns: 5 });
+    const result = await loop.run("test-auto-deny", "echo");
+    await journal.close();
+
+    expect(result.permissionDenied).toBe(true);
+
+    const events = (await readFile(journalPath, "utf-8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    expect(events.some((e) => e.type === "permission:denied")).toBe(true);
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("agent finishes normally when all tools are denied (no hang)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "helm-test-"));
+    const journalPath = join(dir, "run.jsonl");
+    const journal = new JsonlJournal(journalPath);
+    await journal.open();
+
+    const perm = new PermissionRuntime();
+    const policy: PermissionPolicy = { strategy: "auto-deny" };
+    const toolRuntime = new ToolRuntime(perm, policy);
+    toolRuntime.register({
+      name: "echo",
+      description: "echoes",
+      riskLevel: RiskLevel.LOW,
+      parameters: {},
+      async execute(args: Record<string, unknown>) {
+        return `echo: ${args.text}`;
+      },
+    });
+
+    // Three tool calls in one turn, all denied → agent continues to next response
+    const provider = new ScriptedProvider([
+      {
+        role: "assistant",
+        content: "Trying three tools.",
+        toolCalls: [
+          { id: "tc1", name: "echo", args: { text: "a" } },
+          { id: "tc2", name: "echo", args: { text: "b" } },
+          { id: "tc3", name: "echo", args: { text: "c" } },
+        ],
+      },
+      { role: "assistant", content: "All blocked, giving up." },
+    ]);
+
+    const loop = new AgentLoop(provider, toolRuntime, journal, { maxTurns: 5 });
+    const result = await loop.run("test-all-denied", "go");
+    await journal.close();
+
+    // Should finish, not hang
+    expect(result.exitCode).toBe(0);
+    expect(result.permissionDenied).toBe(true);
+
+    const events = (await readFile(journalPath, "utf-8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    const denied = events.filter((e) => e.type === "permission:denied");
+    expect(denied.length).toBe(3);
 
     await rm(dir, { recursive: true, force: true });
   });

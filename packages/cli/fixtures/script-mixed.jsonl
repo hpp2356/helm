@@ -1,0 +1,2 @@
+{"role":"assistant","content":"Let me calculate and also check something dangerous.","toolCalls":[{"id":"tc1","name":"calculator","args":{"expression":"2+3"}},{"id":"tc2","name":"danger","args":{"target":"/etc"}}]}
+{"role":"assistant","content":"Done."}

@@ -1,10 +1,13 @@
-import { type Tool } from "@helm/core";
+import type { Tool, PermissionDecision, PermissionPolicy } from "@helm/core";
 import { type PermissionRuntime } from "./permission-runtime.js";
 
 export class ToolRuntime {
   private tools: Map<string, Tool> = new Map();
 
-  constructor(private permissionRuntime?: PermissionRuntime) {}
+  constructor(
+    private permissionRuntime?: PermissionRuntime,
+    private permissionPolicy?: PermissionPolicy,
+  ) {}
 
   register(tool: Tool): void {
     if (this.tools.has(tool.name)) {
@@ -29,10 +32,29 @@ export class ToolRuntime {
     return Array.from(this.tools.keys());
   }
 
+  /**
+   * Run the permission check for a tool call so the caller (e.g. AgentLoop)
+   * can journal the decision before execution.
+   *
+   * Returns null when no PermissionRuntime is configured (all tools allowed).
+   */
+  checkPermission(
+    toolName: string,
+    args: Record<string, unknown>,
+  ): PermissionDecision | null {
+    if (!this.permissionRuntime) return null;
+
+    const tool = this.tools.get(toolName);
+    return this.permissionRuntime.check(toolName, args, {
+      toolRiskLevel: tool?.riskLevel,
+      policy: this.permissionPolicy,
+    });
+  }
+
   async execute(
     name: string,
     args: Record<string, unknown>,
-    signal?: AbortSignal
+    signal?: AbortSignal,
   ): Promise<string> {
     const tool = this.tools.get(name);
     if (!tool) {
@@ -41,7 +63,7 @@ export class ToolRuntime {
 
     // Permission check (if PermissionRuntime is configured)
     if (this.permissionRuntime) {
-      const decision = this.permissionRuntime.check(name, args);
+      const decision = this.checkPermission(name, args)!;
       if (!decision.allowed) {
         return `Error: permission denied — ${decision.reason}`;
       }
