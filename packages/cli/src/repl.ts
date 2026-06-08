@@ -344,15 +344,79 @@ function frameRule(): string {
   return DIM + "─".repeat(frameWidth()) + RESET;
 }
 
+/** The caret shown on the input row. */
+const CARET = BOLD + ORANGE + "› " + RESET;
+
 /**
- * The readline prompt: a single divider rule on its own row, then the `›`
- * caret on the next line. Just ONE rule — painting a second rule *below* the
- * input would require a cursor save + newline, which scrolls the screen and
- * stacks duplicate rules on every resize tick (eating scrollback). The single
- * rule is owned by readline, so it reflows natively on resize via prompt(true).
+ * The input is bracketed by two rules — a top rule and a bottom rule — both
+ * visible the whole time you type, Claude-style.
+ *
+ * Crucial design point learned the hard way: readline's prompt is kept to a
+ * SINGLE row (just the caret). We never put a rule inside the prompt, because
+ * a wide rule wraps when the window narrows, and readline then miscounts the
+ * prompt's height on resize and stacks orphaned copies. Instead:
+ *   • the TOP rule is printed once when the prompt opens and never touched again
+ *     (readline only ever clears downward, so typing can't disturb it, and we
+ *     deliberately do NOT repaint it on resize — repainting anything above the
+ *     input fights the terminal's scrollback reflow);
+ *   • the BOTTOM rule lives one row below the input (never in reflow history),
+ *     painted with save/restore-cursor (ESC 7 / ESC 8) so it never scrolls and
+ *     is immune to CJK column-width math. It's repainted on each keystroke and
+ *     on resize, so it always matches the current width.
  */
-function framedPrompt(): string {
-  return frameRule() + "\n" + BOLD + ORANGE + "› " + RESET;
+class InputFrame {
+  private active = false;
+  private readonly onKeypress = () => {
+    if (this.active) setImmediate(() => this.paintBottom());
+  };
+  private readonly onResize = () => {
+    if (this.active) this.paintBottom();
+  };
+
+  attach(): void {
+    if (!process.stdout.isTTY) return;
+    process.stdin.on("keypress", this.onKeypress);
+    process.stdout.on("resize", this.onResize);
+  }
+
+  detach(): void {
+    process.stdin.off("keypress", this.onKeypress);
+    process.stdout.off("resize", this.onResize);
+  }
+
+  /**
+   * Open a fresh frame: top rule, the caret row (issued via the supplied
+   * prompt callback), then the bottom rule one line below.
+   */
+  open(prompt: () => void): void {
+    if (!process.stdout.isTTY) {
+      prompt();
+      return;
+    }
+    // 1) Top rule on its own row, then step onto the input row.
+    // 2) Reserve the bottom row with a real newline FIRST — this is the only
+    //    place a scroll is allowed (when the prompt is at the screen bottom).
+    //    Doing it now means paintBottom's later cursor-down never scrolls, so
+    //    its save/restore (ESC 7 / ESC 8) stays valid.
+    // 3) Return to the input row and let readline draw the caret there.
+    process.stdout.write(frameRule() + "\n"); // top rule + onto input row
+    process.stdout.write("\n\x1b[1A"); // reserve row below, back to input row
+    prompt(); // caret on the input row; cursor ends up just after it
+    this.active = true;
+    this.paintBottom(); // draw the bottom rule, leaving the cursor put
+  }
+
+  /** Stop framing (on submit / while a turn runs) without redrawing. */
+  close(): void {
+    this.active = false;
+  }
+
+  private paintBottom(): void {
+    if (!this.active || !process.stdout.isTTY) return;
+    // Save cursor → move DOWN one row (never a newline, so it never scrolls) →
+    // clear that row → draw the bottom rule at the current width → restore.
+    process.stdout.write("\x1b7\x1b[1B\r\x1b[2K" + frameRule() + "\x1b8");
+  }
 }
 
 /**
@@ -598,23 +662,15 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     terminal: true,
   });
 
-  /** Issue a fresh framed prompt: a single divider rule + the `›` caret. */
-  const reprompt = (): void => {
-    rl.setPrompt(framedPrompt());
-    rl.prompt();
-  };
+  // Two-rule input frame; owns its own keypress + resize repainting.
+  const frame = new InputFrame();
+  frame.attach();
+  rl.setPrompt(CARET); // single-row prompt; the rules are drawn by the frame
 
-  // ── Live resize: reflow the prompt's divider to the new width ───────
-  // The rule is part of readline's prompt, so we just re-set the prompt at the
-  // new width and let readline redraw its two rows in place. prompt(true) keeps
-  // the typed line and cursor; readline owns the redraw, so nothing scrolls or
-  // stacks — a drag that fires many resize events just reflows the one rule.
-  const onResize = (): void => {
-    if (!process.stdout.isTTY) return;
-    rl.setPrompt(framedPrompt());
-    rl.prompt(true);
+  /** Open a fresh framed prompt: top rule, caret row, bottom rule. */
+  const reprompt = (): void => {
+    frame.open(() => rl.prompt());
   };
-  if (process.stdout.isTTY) process.stdout.on("resize", onResize);
 
   // ── REPL state ─────────────────────────────────────────────────────
   const SYSTEM_MESSAGE: MessageRecord | null =
@@ -840,17 +896,22 @@ Session stats:
 
   // ── Readline event handlers ────────────────────────────────────────
   rl.on("line", (line) => {
+    frame.close(); // stop keystroke/resize repaints for the submitted frame
+
     // Empty or whitespace-only Enter is a no-op, like Claude: don't run a
-    // turn or scroll the transcript — just redraw the same prompt in place.
-    // The prompt is 2 rows (rule / input); after Enter the cursor is on the
-    // row below the input, so move up 2 to the rule row and clear down before
-    // repainting, leaving a single prompt rather than stacking duplicates.
+    // turn or scroll the transcript — just redraw the prompt in place. The
+    // frame is 3 rows (top rule / input / bottom rule); after Enter the cursor
+    // is on the bottom rule, so move up 2 to the top rule and clear down before
+    // repainting, leaving a single frame rather than stacking duplicates.
     if (!line.trim()) {
       if (process.stdout.isTTY) process.stdout.write("\x1b[2A\x1b[0J");
       reprompt();
       return;
     }
 
+    // Real input: the cursor sits on the bottom rule; step past it so the reply
+    // renders below the now-complete frame (which becomes transcript).
+    if (process.stdout.isTTY) process.stdout.write("\n");
     processInput(line).catch((err) => {
       console.error(`REPL error: ${err.message}`);
       hr();
@@ -859,7 +920,7 @@ Session stats:
   });
 
   rl.on("close", () => {
-    process.stdout.off("resize", onResize);
+    frame.detach();
     try {
       const dir = process.env.HOME ?? "/tmp";
       writeFileSync(
