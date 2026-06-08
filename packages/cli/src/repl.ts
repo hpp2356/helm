@@ -331,7 +331,7 @@ function boxOuterWidth(): number {
 }
 
 /**
- * Width of the input-frame rules. These fill the terminal (minus one column to
+ * Width of the prompt divider rule. Fills the terminal (minus one column to
  * avoid wrapping a full-width rule onto the next row), so the dividers span the
  * whole window like Claude's.
  */
@@ -339,65 +339,20 @@ function frameWidth(): number {
   return Math.max(8, termCols() - 1);
 }
 
-/** A full-width horizontal rule used as the top/bottom edge of the input frame. */
+/** A full-width horizontal rule used as the prompt's divider. */
 function frameRule(): string {
   return DIM + "─".repeat(frameWidth()) + RESET;
 }
 
 /**
- * The readline prompt: a top rule, then the `›` caret on the next line.
- * readline only repaints this last row as the user types, so the top rule
- * stays put. The matching bottom rule is kept anchored below the cursor by
- * {@link InputFrame}.
+ * The readline prompt: a single divider rule on its own row, then the `›`
+ * caret on the next line. Just ONE rule — painting a second rule *below* the
+ * input would require a cursor save + newline, which scrolls the screen and
+ * stacks duplicate rules on every resize tick (eating scrollback). The single
+ * rule is owned by readline, so it reflows natively on resize via prompt(true).
  */
 function framedPrompt(): string {
   return frameRule() + "\n" + BOLD + ORANGE + "› " + RESET;
-}
-
-/**
- * Keeps a bottom rule painted one row below the readline input. readline clears
- * everything beneath the cursor on each keystroke, so we re-paint the rule
- * after each keypress using save/restore-cursor: the input row ends up bracketed
- * by two rules (top + bottom), both visible the whole time the user is typing —
- * Claude-style.
- */
-class InputFrame {
-  private active = false;
-  private readonly onKeypress = () => {
-    if (this.active) setImmediate(() => this.paintBottom());
-  };
-
-  attach(): void {
-    if (process.stdin.isTTY) {
-      process.stdin.on("keypress", this.onKeypress);
-    }
-  }
-
-  detach(): void {
-    process.stdin.off("keypress", this.onKeypress);
-  }
-
-  /** Begin framing: caller has just issued the prompt; draw the bottom rule. */
-  open(): void {
-    this.active = true;
-    this.paintBottom();
-  }
-
-  /** Stop framing (e.g. while a turn runs / on submit) without redrawing. */
-  close(): void {
-    this.active = false;
-  }
-
-  /** Whether a framed prompt is currently being shown (used by resize). */
-  isActive(): boolean {
-    return this.active;
-  }
-
-  private paintBottom(): void {
-    if (!this.active || !process.stdout.isTTY) return;
-    // Save cursor (on the input row) → newline + bottom rule → restore cursor.
-    process.stdout.write("\x1b7\n" + frameRule() + "\x1b8");
-  }
 }
 
 /**
@@ -643,28 +598,21 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     terminal: true,
   });
 
-  // Bottom-anchored input frame (top + bottom rules around the `›` prompt).
-  const frame = new InputFrame();
-  frame.attach();
-
-  /** Issue a fresh framed prompt: top rule + caret, then anchor the bottom rule. */
+  /** Issue a fresh framed prompt: a single divider rule + the `›` caret. */
   const reprompt = (): void => {
     rl.setPrompt(framedPrompt());
     rl.prompt();
-    frame.open();
   };
 
-  // ── Live resize: reflow the active input frame to the new width ──────
-  // The top rule is baked into the prompt at draw-time, so a resize alone
-  // won't update it. When the terminal resizes while a framed prompt is
-  // showing, step up to the top-rule row, clear the 3-row frame, and redraw
-  // at the new width. readline preserves the typed line (rl.line) across the
-  // redraw on its own — we must NOT re-write it, or it doubles.
+  // ── Live resize: reflow the prompt's divider to the new width ───────
+  // The rule is part of readline's prompt, so we just re-set the prompt at the
+  // new width and let readline redraw its two rows in place. prompt(true) keeps
+  // the typed line and cursor; readline owns the redraw, so nothing scrolls or
+  // stacks — a drag that fires many resize events just reflows the one rule.
   const onResize = (): void => {
-    if (!frame.isActive() || !process.stdout.isTTY) return;
-    frame.close(); // suspend keypress repaints during the redraw
-    process.stdout.write("\x1b[1A\r\x1b[0J"); // up to top rule, clear frame
-    reprompt(); // redraws top rule + preserved input, re-anchors bottom rule
+    if (!process.stdout.isTTY) return;
+    rl.setPrompt(framedPrompt());
+    rl.prompt(true);
   };
   if (process.stdout.isTTY) process.stdout.on("resize", onResize);
 
@@ -892,26 +840,17 @@ Session stats:
 
   // ── Readline event handlers ────────────────────────────────────────
   rl.on("line", (line) => {
-    frame.close();
-
     // Empty or whitespace-only Enter is a no-op, like Claude: don't run a
     // turn or scroll the transcript — just redraw the same prompt in place.
-    // The 3-row frame is (top rule / input / bottom rule); after Enter the
-    // cursor is on the bottom rule, so move up 2 to the top rule and clear
-    // down before repainting, leaving a single frame rather than stacking.
+    // The prompt is 2 rows (rule / input); after Enter the cursor is on the
+    // row below the input, so move up 2 to the rule row and clear down before
+    // repainting, leaving a single prompt rather than stacking duplicates.
     if (!line.trim()) {
-      if (process.stdout.isTTY) {
-        process.stdout.write("\x1b[2A\x1b[0J");
-        reprompt();
-      } else {
-        reprompt();
-      }
+      if (process.stdout.isTTY) process.stdout.write("\x1b[2A\x1b[0J");
+      reprompt();
       return;
     }
 
-    // Real input: step past the bottom rule so the reply (and the next framed
-    // prompt) render cleanly beneath the completed frame.
-    if (process.stdout.isTTY) process.stdout.write("\n");
     processInput(line).catch((err) => {
       console.error(`REPL error: ${err.message}`);
       hr();
@@ -920,8 +859,6 @@ Session stats:
   });
 
   rl.on("close", () => {
-    frame.close();
-    frame.detach();
     process.stdout.off("resize", onResize);
     try {
       const dir = process.env.HOME ?? "/tmp";
