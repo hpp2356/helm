@@ -364,10 +364,19 @@ Session stats:
         console.log(`  (Turn cancelled: ${result.cancelled.reason})`);
       }
 
-      // Print assistant text
+      // Print assistant text if not already streamed
       const lastMessage = result.messages[result.messages.length - 1];
       if (lastMessage && lastMessage.role === "assistant" && lastMessage.content) {
-        console.log(`\n${lastMessage.content}`);
+        // For scripted providers (no streaming), print full content.
+        // For streaming providers, text was already printed via onText.
+        const isStreaming =
+          (provider as unknown as Record<string, unknown>).onText !== undefined &&
+          (provider as unknown as Record<string, unknown>).onText !== null;
+        if (!isStreaming) {
+          console.log(`\n${lastMessage.content}`);
+        } else {
+          console.log();
+        }
       }
 
       // Update message history for next turn

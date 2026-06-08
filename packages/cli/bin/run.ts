@@ -277,6 +277,9 @@ async function main() {
         replProvider = new OpenAIC({
           apiKey,
           model: providerName,
+          onText: (text: string) => {
+            process.stdout.write(text);
+          },
         });
       } catch {
         console.error(
