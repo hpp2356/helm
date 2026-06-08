@@ -45,6 +45,21 @@ export type RunEvent =
       errorMessage: string;
       delayMs: number;
       timestamp: number;
+    }
+  | {
+      type: "permission:allowed";
+      runId: string;
+      turnIndex: number;
+      toolName: string;
+      timestamp: number;
+    }
+  | {
+      type: "permission:denied";
+      runId: string;
+      turnIndex: number;
+      toolName: string;
+      reason: string;
+      timestamp: number;
     };
 
 export function eventToString(event: RunEvent): string {

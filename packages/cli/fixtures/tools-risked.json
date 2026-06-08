@@ -18,5 +18,15 @@
       "properties": { "city": { "type": "string" } },
       "required": ["city"]
     }
+  },
+  {
+    "name": "danger",
+    "description": "dangerous operation",
+    "riskLevel": "CRITICAL",
+    "parameters": {
+      "type": "object",
+      "properties": { "target": { "type": "string" } },
+      "required": ["target"]
+    }
   }
 ]

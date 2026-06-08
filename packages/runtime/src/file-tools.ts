@@ -169,6 +169,7 @@ export function createReadTool(opts: FileToolOptions): Tool {
     name: "read",
     description:
       "Read a file from the workspace. Supports offset and limit for partial reads.",
+    riskLevel: RiskLevel.LOW,
     parameters: {
       type: "object",
       properties: {
@@ -241,6 +242,7 @@ export function createWriteTool(opts: FileToolOptions): Tool {
   return {
     name: "write",
     description: "Create or overwrite a file in the workspace.",
+    riskLevel: RiskLevel.HIGH,
     parameters: {
       type: "object",
       properties: {
@@ -291,6 +293,7 @@ export function createEditTool(opts: FileToolOptions): Tool {
     name: "edit",
     description:
       "Find and replace text in an existing file. oldString must match exactly (whitespace-sensitive).",
+    riskLevel: RiskLevel.HIGH,
     parameters: {
       type: "object",
       properties: {
@@ -357,6 +360,7 @@ export function createLsTool(opts: FileToolOptions): Tool {
   return {
     name: "ls",
     description: "List directory contents. Defaults to workspace root.",
+    riskLevel: RiskLevel.LOW,
     parameters: {
       type: "object",
       properties: {
@@ -401,6 +405,7 @@ export function createGlobTool(opts: FileToolOptions): Tool {
   return {
     name: "glob",
     description: "Find files matching a glob pattern in the workspace.",
+    riskLevel: RiskLevel.LOW,
     parameters: {
       type: "object",
       properties: {

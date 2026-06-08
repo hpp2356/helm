@@ -24,6 +24,7 @@ export function createBashTool(opts: BashToolOptions): Tool {
     name: "bash",
     description:
       "Execute a bash shell command within the workspace. Safety checks block dangerous commands.",
+    riskLevel: RiskLevel.CRITICAL,
     parameters: {
       type: "object",
       properties: {

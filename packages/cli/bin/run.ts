@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { JsonlJournal, RiskLevel } from "@helm/core";
+import {
+  JsonlJournal,
+  RiskLevel,
+  type PermissionPolicy,
+  type NonInteractiveStrategy,
+} from "@helm/core";
 import type { Tool, Message } from "@helm/core";
 import {
   ScriptedProvider,
@@ -14,6 +19,7 @@ interface ToolDef {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
+  riskLevel?: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 }
 
 interface ScriptLine {
@@ -45,13 +51,48 @@ function formatTime(): string {
   return new Date().toISOString().slice(11, 19);
 }
 
+const VALID_STRATEGIES: NonInteractiveStrategy[] = [
+  "auto-approve",
+  "auto-deny",
+  "risk-threshold",
+];
+
+function isNonInteractiveStrategy(
+  s: string,
+): s is NonInteractiveStrategy {
+  return (VALID_STRATEGIES as string[]).includes(s);
+}
+
+const EXIT_PERMISSION_DENIED = 2;
+
 async function main() {
   const rawArgs = process.argv.slice(2);
   const positional: string[] = [];
   let timeoutMs: number | undefined;
   let turnDelayMs = 0;
+  let nonInteractive: NonInteractiveStrategy | undefined;
+  let riskThreshold: RiskLevel | undefined;
+
   for (const arg of rawArgs) {
-    if (arg.startsWith("--timeout=")) {
+    if (arg.startsWith("--non-interactive=")) {
+      const strategy = arg.slice("--non-interactive=".length);
+      if (!isNonInteractiveStrategy(strategy)) {
+        console.error(
+          `Invalid --non-interactive value: "${strategy}". Must be one of: ${VALID_STRATEGIES.join(", ")}`,
+        );
+        process.exit(1);
+      }
+      nonInteractive = strategy;
+    } else if (arg.startsWith("--risk-threshold=")) {
+      const level = arg.slice("--risk-threshold=".length);
+      if (!(level in RiskLevel)) {
+        console.error(
+          `Invalid --risk-threshold value: "${level}". Must be one of: LOW, MEDIUM, HIGH, CRITICAL`,
+        );
+        process.exit(1);
+      }
+      riskThreshold = RiskLevel[level as keyof typeof RiskLevel];
+    } else if (arg.startsWith("--timeout=")) {
       const v = Number(arg.slice("--timeout=".length));
       if (!Number.isFinite(v) || v <= 0) {
         console.error(`Invalid --timeout value: ${arg}`);
@@ -73,10 +114,27 @@ async function main() {
     }
   }
 
+  // Validate risk-threshold strategy requires threshold
+  if (nonInteractive === "risk-threshold" && riskThreshold === undefined) {
+    console.error(
+      "--non-interactive=risk-threshold requires --risk-threshold=<LOW|MEDIUM|HIGH|CRITICAL>",
+    );
+    process.exit(1);
+  }
+
   if (positional.length < 3) {
     console.error(
-      "Usage: helm run <tools.json> <script.jsonl> <perms.json> [runId] [--timeout=<ms>]"
+      "Usage: helm run <tools.json> <script.jsonl> <perms.json> [runId] [flags]",
     );
+    console.error("Flags:");
+    console.error(
+      "  --non-interactive=<auto-approve|auto-deny|risk-threshold>",
+    );
+    console.error(
+      "  --risk-threshold=<LOW|MEDIUM|HIGH|CRITICAL>   (for risk-threshold strategy)",
+    );
+    console.error("  --timeout=<ms>");
+    console.error("  --turn-delay-ms=<ms>");
     process.exit(1);
   }
 
@@ -102,14 +160,26 @@ async function main() {
     }
   }
 
-  // 2. Load tools and register
+  // 2. Build permission policy (if non-interactive)
+  let permissionPolicy: PermissionPolicy | undefined;
+  if (nonInteractive) {
+    permissionPolicy = {
+      strategy: nonInteractive,
+      riskThreshold,
+    };
+  }
+
+  // 3. Load tools and register
   const toolDefs = loadJson<ToolDef[]>(toolsPath);
-  const toolRuntime = new ToolRuntime(permissionRuntime);
+  const toolRuntime = new ToolRuntime(permissionRuntime, permissionPolicy);
   for (const td of toolDefs) {
     toolRuntime.register({
       name: td.name,
       description: td.description,
       parameters: td.parameters,
+      riskLevel: td.riskLevel
+        ? RiskLevel[td.riskLevel]
+        : undefined,
       async execute(args: Record<string, unknown>) {
         // Simple echo for CLI demo — in production this is the real tool impl
         return JSON.stringify(Object.entries(args).map(([k, v]) => `${k}=${v}`));
@@ -117,7 +187,7 @@ async function main() {
     });
   }
 
-  // 3. Load script
+  // 4. Load script
   const rawScript = readFileSync(resolve(scriptPath), "utf-8").trim();
   const scriptLines: ScriptLine[] = rawScript
     .split("\n")
@@ -144,7 +214,7 @@ async function main() {
       }
     : baseProvider;
 
-  // 4. Create journal
+  // 5. Create journal
   const journalPath = `/tmp/helm-${runId}.jsonl`;
   const journal = new JsonlJournal(journalPath);
   await journal.open();
@@ -169,11 +239,20 @@ async function main() {
         break;
       case "tool:result": {
         const out = event.output as string;
+        const icon = out.startsWith("Error: permission denied") ? "⛔" : "📤";
         console.log(
-          `📤 [${ts}] TOOL RESULT  ${out.length > 80 ? out.slice(0, 80) + "..." : out}`
+          `${icon} [${ts}] TOOL RESULT  ${out.length > 80 ? out.slice(0, 80) + "..." : out}`
         );
         break;
       }
+      case "permission:allowed":
+        console.log(`✅ [${ts}] PERM ALLOW   ${event.toolName}`);
+        break;
+      case "permission:denied":
+        console.log(
+          `⛔ [${ts}] PERM DENY    ${event.toolName} — ${event.reason}`,
+        );
+        break;
       case "error":
         console.log(`❌ [${ts}] ERROR        ${event.message}`);
         break;
@@ -187,12 +266,16 @@ async function main() {
     await originalAppend(event);
   };
 
-  // 5. Run!
+  // 6. Run!
+  const modeLabel = nonInteractive
+    ? `non-interactive (${nonInteractive}${riskThreshold ? `, threshold=${riskThreshold}` : ""})`
+    : "interactive";
   console.log(`\n${"=".repeat(50)}`);
   console.log(`Helm CLI — runId: ${runId}`);
   console.log(
     `Tools: ${toolDefs.length}, Script: ${scriptLines.length}, Perms: ${permRules.length}` +
-      (timeoutMs !== undefined ? `, Timeout: ${timeoutMs}ms` : "")
+      (timeoutMs !== undefined ? `, Timeout: ${timeoutMs}ms` : "") +
+      `, Mode: ${modeLabel}`,
   );
   console.log(`Journal: ${journalPath}`);
   console.log(`${"=".repeat(50)}\n`);
@@ -214,8 +297,13 @@ async function main() {
   process.off("SIGINT", onSigint);
   await journal.close();
   console.log(`\nDone. Journal → ${journalPath}`);
+
+  // Determine exit code
   if (result.exitCode !== 0) {
     process.exit(result.exitCode);
+  }
+  if (result.permissionDenied) {
+    process.exit(EXIT_PERMISSION_DENIED);
   }
 }
 

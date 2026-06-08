@@ -38,11 +38,14 @@ export interface AgentLoopOptions {
 export interface AgentLoopResult {
   exitCode: number;
   cancelled?: { reason: "external" | "timeout" };
+  /** True if any permission was denied during the run. */
+  permissionDenied: boolean;
 }
 
 const EXIT_OK = 0;
 const EXIT_CANCELLED = 130; // SIGINT convention
 const EXIT_ERROR = 1;
+const EXIT_PERMISSION_DENIED = 2;
 
 export class AgentLoop {
   constructor(
@@ -130,10 +133,12 @@ export class AgentLoop {
       return {
         exitCode: EXIT_CANCELLED,
         cancelled: { reason: cancelReason ?? "external" },
+        permissionDenied: false,
       };
     }
 
     let exitCode = EXIT_OK;
+    let permissionDenied = false;
     let cancelled: { reason: "external" | "timeout" } | undefined;
 
     try {
@@ -289,7 +294,53 @@ export class AgentLoop {
               timestamp: Date.now(),
             });
 
+            // Permission check (if PermissionRuntime configured)
+            const permDecision = this.toolRuntime.checkPermission(
+              tc.name,
+              tc.args,
+            );
+
             let output: string;
+
+            if (permDecision) {
+              if (permDecision.allowed) {
+                await this.journal.append({
+                  type: "permission:allowed",
+                  runId,
+                  turnIndex,
+                  toolName: tc.name,
+                  timestamp: Date.now(),
+                });
+              } else {
+                permissionDenied = true;
+                await this.journal.append({
+                  type: "permission:denied",
+                  runId,
+                  turnIndex,
+                  toolName: tc.name,
+                  reason: permDecision.reason ?? "unknown",
+                  timestamp: Date.now(),
+                });
+                output = `Error: permission denied — ${permDecision.reason}`;
+
+                await this.journal.append({
+                  type: "tool:result",
+                  runId,
+                  turnIndex,
+                  toolName: tc.name,
+                  output,
+                  timestamp: Date.now(),
+                });
+
+                messages.push({
+                  role: "tool",
+                  content: output,
+                  toolCallId: tc.id,
+                });
+                continue;
+              }
+            }
+
             try {
               output = await this.toolRuntime.execute(
                 tc.name,
@@ -351,6 +402,8 @@ export class AgentLoop {
       exitCode,
     });
 
-    return cancelled ? { exitCode, cancelled } : { exitCode };
+    return cancelled
+      ? { exitCode, cancelled, permissionDenied }
+      : { exitCode, permissionDenied };
   }
 }
