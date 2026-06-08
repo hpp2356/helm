@@ -72,14 +72,13 @@ function isNonInteractiveStrategy(
 
 const EXIT_PERMISSION_DENIED = 2;
 
-// ── Config file ───────────────────────────────────────────────────────────
+// ── Config file: ~/.helm/settings.json (like ~/.claude/settings.json) ──────
 
-interface HelmRcFile {
+interface HelmSettings {
   provider?: "scripted" | "deepseek";
   model?: string;
+  /** API key inline. */
   apiKey?: string;
-  /** Env var name for API key (e.g. "DEEPSEEK_API_KEY"). */
-  apiKeyEnv?: string;
   tools?: string;
   perms?: string;
   workspace?: string;
@@ -91,15 +90,18 @@ interface HelmRcFile {
   maxTurns?: number;
 }
 
-function loadHelmRc(): HelmRcFile {
+function loadSettings(): HelmSettings {
   const candidates = [
+    resolve(process.cwd(), ".helm", "settings.json"),
+    resolve(process.env.HOME ?? "/tmp", ".helm", "settings.json"),
+    // Backward-compat
     resolve(process.cwd(), ".helmrc.json"),
     resolve(process.env.HOME ?? "/tmp", ".helmrc.json"),
   ];
   for (const p of candidates) {
     try {
       if (existsSync(p)) {
-        return JSON.parse(readFileSync(p, "utf-8")) as HelmRcFile;
+        return JSON.parse(readFileSync(p, "utf-8")) as HelmSettings;
       }
     } catch {
       // Non-fatal
@@ -112,7 +114,7 @@ function loadHelmRc(): HelmRcFile {
 
 function parseReplArgs(
   args: string[],
-  base: HelmRcFile = {},
+  base: HelmSettings = {},
 ): {
   providerKind: "scripted" | "deepseek";
   model?: string;
@@ -130,9 +132,7 @@ function parseReplArgs(
   // Apply config file first, CLI flags override
   let providerKind: "scripted" | "deepseek" = base.provider ?? "scripted";
   let model: string | undefined = base.model;
-  let apiKey: string | undefined =
-    base.apiKey ??
-    (base.apiKeyEnv ? process.env[base.apiKeyEnv] : undefined);
+  let apiKey: string | undefined = base.apiKey;
   let toolsPath: string | undefined = base.tools;
   let permsPath: string | undefined = base.perms;
   let workspaceRoot: string | undefined = base.workspace;
@@ -237,17 +237,21 @@ async function main() {
   if (isRepl) {
     const replArgs = rawArgs[0] === "repl" ? rawArgs.slice(1) : rawArgs;
     const { startRepl } = await import("../src/repl.js");
-    const config = loadHelmRc();
+    const config = loadSettings();
 
     // Detect which config file was found
-    const cwdRc = resolve(process.cwd(), ".helmrc.json");
-    const homeRc = resolve(process.env.HOME ?? "/tmp", ".helmrc.json");
+    const cwdSettings = resolve(process.cwd(), ".helm", "settings.json");
+    const homeSettings = resolve(
+      process.env.HOME ?? "/tmp",
+      ".helm",
+      "settings.json",
+    );
     const configPath =
       Object.keys(config).length > 0
-        ? existsSync(cwdRc)
-          ? cwdRc
-          : existsSync(homeRc)
-            ? homeRc
+        ? existsSync(cwdSettings)
+          ? cwdSettings
+          : existsSync(homeSettings)
+            ? homeSettings
             : undefined
         : undefined;
 

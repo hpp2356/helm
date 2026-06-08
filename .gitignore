@@ -22,6 +22,9 @@ coverage/
 .helm/traces/
 .helm/sessions/
 
+# Helm settings with API keys (use settings.example.json as template)
+.helm/settings.json
+
 # Private operator kits
 helm-control-room-kit*/
 helm-one-folder-kit*/
