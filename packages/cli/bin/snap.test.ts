@@ -109,4 +109,32 @@ describe("TurnStateMachine", () => {
     sm.enqueue("second");
     expect(sm.pendingInput).toBe("second");
   });
+
+  it("enqueue from idle transitions to queued", async () => {
+    const { TurnStateMachine } = await import("../src/state-machine.js");
+    const sm = new TurnStateMachine();
+    sm.enqueue("hello");
+    expect(sm.state).toBe("queued");
+    expect(sm.pendingInput).toBe("hello");
+  });
+
+  it("dequeue returns and clears pending input", async () => {
+    const { TurnStateMachine } = await import("../src/state-machine.js");
+    const sm = new TurnStateMachine();
+    sm.enqueue("hello");
+    expect(sm.dequeue()).toBe("hello");
+    expect(sm.pendingInput).toBeNull();
+  });
+
+  it("off removes listener", async () => {
+    const { TurnStateMachine } = await import("../src/state-machine.js");
+    const sm = new TurnStateMachine();
+    const events: string[] = [];
+    const listener = (s: string) => events.push(s);
+    sm.on("change", listener);
+    sm.send("sending");
+    sm.off("change", listener);
+    sm.send("running");
+    expect(events).toEqual(["sending"]); // not "running"
+  });
 });

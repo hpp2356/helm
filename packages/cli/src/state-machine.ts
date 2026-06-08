@@ -44,7 +44,6 @@ export class TurnStateMachine {
 
   enqueue(input: string): void {
     this._pendingInput = input;
-    if (this._state === "idle" || this._state === "completed" || this._state === "failed") return;
     if (this._state !== "queued") {
       this._state = "queued";
       for (const l of this.listeners) l(this._state);
