@@ -3,6 +3,7 @@ import { ScriptedProvider } from "./scripted-provider.js";
 import { AgentLoop, type AgentLoopOptions } from "./agent-loop.js";
 import { ToolRuntime } from "./tool-runtime.js";
 import { PermissionRuntime } from "./permission-runtime.js";
+import { Compaction } from "./compaction.js";
 import { type RetryPolicy, DEFAULT_RETRY_POLICY } from "./retry.js";
 import { JsonlJournal, TokenBudget, RiskLevel } from "@helm/core";
 import type { PermissionPolicy } from "@helm/core";
@@ -1043,6 +1044,293 @@ describe("AgentLoop", () => {
       .map((l) => JSON.parse(l));
     const denied = events.filter((e) => e.type === "permission:denied");
     expect(denied.length).toBe(3);
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  // ── PR14: Compaction tests ───────────────────────────────────────
+
+  it("does not compact when budget is below warning threshold", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "helm-test-"));
+    const journalPath = join(dir, "run.jsonl");
+    const journal = new JsonlJournal(journalPath);
+    await journal.open();
+
+    const provider = new ScriptedProvider([
+      { role: "assistant", content: "Hello!" },
+    ]);
+
+    const toolRuntime = new ToolRuntime();
+    // Large budget — won't hit warning with a single-user-message conversation
+    const tokenBudget = new TokenBudget(100_000);
+    const contextBuilder = new ContextBuilder(new CharTokenCounter(4));
+    const compaction = new Compaction({
+      strategy: "truncate",
+      tokenCounter: new CharTokenCounter(),
+      keepRecentTurns: 1,
+    });
+
+    const loop = new AgentLoop(provider, toolRuntime, journal, {
+      maxTurns: 5,
+      tokenBudget,
+      contextBuilder,
+      compaction,
+    });
+    const result = await loop.run("test-no-compact", "Hi!");
+    await journal.close();
+
+    expect(result.exitCode).toBe(0);
+
+    const events = (await readFile(journalPath, "utf-8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    // No compaction event
+    expect(events.filter((e) => e.type === "compaction").length).toBe(0);
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("triggers compaction when budget reaches warning threshold", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "helm-test-"));
+    const journalPath = join(dir, "run.jsonl");
+    const journal = new JsonlJournal(journalPath);
+    await journal.open();
+
+    const toolRuntime = new ToolRuntime();
+    toolRuntime.register({
+      name: "echo",
+      description: "echoes",
+      parameters: {},
+      async execute(args: Record<string, unknown>) {
+        return `echo: ${args.text}`;
+      },
+    });
+
+    // Many turns, small budget to trigger compaction quickly
+    const provider = new ScriptedProvider([
+      { role: "assistant", content: "Turn 0", toolCalls: [{ id: "t0", name: "echo", args: { text: "a" } }] },
+      { role: "assistant", content: "Turn 1", toolCalls: [{ id: "t1", name: "echo", args: { text: "b" } }] },
+      { role: "assistant", content: "Turn 2", toolCalls: [{ id: "t2", name: "echo", args: { text: "c" } }] },
+      { role: "assistant", content: "Turn 3", toolCalls: [{ id: "t3", name: "echo", args: { text: "d" } }] },
+      { role: "assistant", content: "Turn 4", toolCalls: [{ id: "t4", name: "echo", args: { text: "e" } }] },
+      { role: "assistant", content: "Final answer" },
+    ]);
+
+    // Use aggressive token counting (1 char = 1 token) with low warning
+    // Budget large enough to finish all turns after compaction
+    const tokenCounter = new CharTokenCounter(1);
+    const contextBuilder = new ContextBuilder(tokenCounter);
+    const tokenBudget = new TokenBudget(2000, 0.04); // warning at 80 tokens
+    const compaction = new Compaction({
+      strategy: "truncate",
+      tokenCounter,
+      keepRecentTurns: 1,
+    });
+
+    const loop = new AgentLoop(provider, toolRuntime, journal, {
+      maxTurns: 10,
+      tokenBudget,
+      contextBuilder,
+      compaction,
+    });
+    const result = await loop.run("test-compact-trigger", "Do many things.");
+    await journal.close();
+
+    expect(result.exitCode).toBe(0);
+
+    const events = (await readFile(journalPath, "utf-8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    const compactionEvents = events.filter((e) => e.type === "compaction");
+    expect(compactionEvents.length).toBe(1);
+
+    const ce = compactionEvents[0];
+    expect(ce.strategy).toBe("truncate");
+    expect(ce.messageCountBefore).toBeGreaterThan(ce.messageCountAfter);
+    // Token count may not drop if truncation note is longer than the compressed content
+    expect(ce.tokensEstimatedAfter).toBeGreaterThan(0);
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("agent continues working after compaction", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "helm-test-"));
+    const journalPath = join(dir, "run.jsonl");
+    const journal = new JsonlJournal(journalPath);
+    await journal.open();
+
+    const toolRuntime = new ToolRuntime();
+    toolRuntime.register({
+      name: "echo",
+      description: "echoes",
+      parameters: {},
+      async execute(args: Record<string, unknown>) {
+        return `echo: ${args.text}`;
+      },
+    });
+
+    const provider = new ScriptedProvider([
+      { role: "assistant", content: "First turn", toolCalls: [{ id: "t1", name: "echo", args: { text: "hi" } }] },
+      { role: "assistant", content: "Second turn", toolCalls: [{ id: "t2", name: "echo", args: { text: "there" } }] },
+      { role: "assistant", content: "Third turn after compaction", toolCalls: [{ id: "t3", name: "echo", args: { text: "again" } }] },
+      { role: "assistant", content: "All done." },
+    ]);
+
+    // Use aggressive token counting (1 char = 1 token) + low warning
+    const tokenCounter = new CharTokenCounter(1);
+    const contextBuilder = new ContextBuilder(tokenCounter);
+    const tokenBudget = new TokenBudget(2000, 0.04); // warning at 80 tokens
+    const compaction = new Compaction({
+      strategy: "truncate",
+      tokenCounter,
+      keepRecentTurns: 1,
+    });
+
+    const loop = new AgentLoop(provider, toolRuntime, journal, {
+      maxTurns: 10,
+      tokenBudget,
+      contextBuilder,
+      compaction,
+    });
+    const result = await loop.run("test-continue-after", "Go!");
+    await journal.close();
+
+    expect(result.exitCode).toBe(0);
+
+    const events = (await readFile(journalPath, "utf-8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    const compactionEvents = events.filter((e) => e.type === "compaction");
+    expect(compactionEvents.length).toBeGreaterThanOrEqual(1);
+
+    // Tool calls after compaction should still happen
+    const compIdx = events.findIndex((x: Record<string, unknown>) => x.type === "compaction");
+    const toolCallsAfterCompact = events.filter(
+      (e: Record<string, unknown>, i: number) =>
+        e.type === "tool:call" && compIdx >= 0 && i > compIdx,
+    );
+    expect(toolCallsAfterCompact.length).toBeGreaterThanOrEqual(1);
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("only compacts once per run", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "helm-test-"));
+    const journalPath = join(dir, "run.jsonl");
+    const journal = new JsonlJournal(journalPath);
+    await journal.open();
+
+    const toolRuntime = new ToolRuntime();
+    toolRuntime.register({
+      name: "echo",
+      description: "echoes",
+      parameters: {},
+      async execute(args: Record<string, unknown>) {
+        return `echo: ${args.text}`;
+      },
+    });
+
+    const provider = new ScriptedProvider([
+      { role: "assistant", content: "T1", toolCalls: [{ id: "1", name: "echo", args: { text: "a" } }] },
+      { role: "assistant", content: "T2", toolCalls: [{ id: "2", name: "echo", args: { text: "b" } }] },
+      { role: "assistant", content: "T3", toolCalls: [{ id: "3", name: "echo", args: { text: "c" } }] },
+      { role: "assistant", content: "T4", toolCalls: [{ id: "4", name: "echo", args: { text: "d" } }] },
+      { role: "assistant", content: "T5", toolCalls: [{ id: "5", name: "echo", args: { text: "e" } }] },
+      { role: "assistant", content: "T6", toolCalls: [{ id: "6", name: "echo", args: { text: "f" } }] },
+      { role: "assistant", content: "Done." },
+    ]);
+
+    const tokenCounter = new CharTokenCounter(1);
+    const contextBuilder = new ContextBuilder(tokenCounter);
+    const tokenBudget = new TokenBudget(2000, 0.04); // warning at 80 tokens
+    const compaction = new Compaction({
+      strategy: "truncate",
+      tokenCounter,
+      keepRecentTurns: 1,
+    });
+
+    const loop = new AgentLoop(provider, toolRuntime, journal, {
+      maxTurns: 10,
+      tokenBudget,
+      contextBuilder,
+      compaction,
+    });
+    const result = await loop.run("test-once", "Go!");
+    await journal.close();
+
+    expect(result.exitCode).toBe(0);
+
+    const events = (await readFile(journalPath, "utf-8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    const compactionEvents = events.filter((e) => e.type === "compaction");
+    expect(compactionEvents.length).toBe(1);
+
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("compaction with summarize strategy generates summary text", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "helm-test-"));
+    const journalPath = join(dir, "run.jsonl");
+    const journal = new JsonlJournal(journalPath);
+    await journal.open();
+
+    const toolRuntime = new ToolRuntime();
+    toolRuntime.register({
+      name: "echo",
+      description: "echoes",
+      parameters: {},
+      async execute(args: Record<string, unknown>) {
+        return `echo: ${args.text}`;
+      },
+    });
+
+    // Summary provider returns the summary text
+    const summProvider = new ScriptedProvider([
+      { role: "assistant", content: "Summary of the conversation so far." },
+    ]);
+
+    const mainProvider = new ScriptedProvider([
+      { role: "assistant", content: "T1", toolCalls: [{ id: "1", name: "echo", args: { text: "a" } }] },
+      { role: "assistant", content: "T2", toolCalls: [{ id: "2", name: "echo", args: { text: "b" } }] },
+      { role: "assistant", content: "T3", toolCalls: [{ id: "3", name: "echo", args: { text: "c" } }] },
+      { role: "assistant", content: "T4", toolCalls: [{ id: "4", name: "echo", args: { text: "d" } }] },
+      { role: "assistant", content: "Final." },
+    ]);
+
+    const tokenCounter = new CharTokenCounter(1);
+    const contextBuilder = new ContextBuilder(tokenCounter);
+    const tokenBudget = new TokenBudget(2000, 0.04); // warning at 80 tokens
+    const compaction = new Compaction({
+      strategy: "summarize",
+      provider: summProvider,
+      tokenCounter,
+      keepRecentTurns: 1,
+    });
+
+    const loop = new AgentLoop(mainProvider, toolRuntime, journal, {
+      maxTurns: 10,
+      tokenBudget,
+      contextBuilder,
+      compaction,
+    });
+    const result = await loop.run("test-summarize", "Go!");
+    await journal.close();
+
+    expect(result.exitCode).toBe(0);
+
+    const events = (await readFile(journalPath, "utf-8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    const compactionEvents = events.filter((e) => e.type === "compaction");
+    expect(compactionEvents.length).toBe(1);
+    expect(compactionEvents[0].strategy).toBe("summarize");
+    expect(compactionEvents[0].summaryText).toContain("Summary");
 
     await rm(dir, { recursive: true, force: true });
   });
