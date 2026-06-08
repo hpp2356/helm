@@ -450,6 +450,17 @@ describe("CLI REPL (helm repl)", () => {
     expect(stdout).toContain("Goodbye");
   });
 
+  it("ignores empty and whitespace-only input (no turn runs)", () => {
+    // Several bare/whitespace Enters then /stats: turn count must stay 0,
+    // proving none of them ran the agent loop.
+    const { stdout, status } = runRepl(
+      "\n   \n\t\n/stats\n/exit\n",
+      ["--provider=scripted"],
+    );
+    expect(status).toBe(0);
+    expect(stdout).toContain("Turns:    0");
+  });
+
   it("processes a user message and gets agent reply", () => {
     const { stdout, status } = runRepl(
       "Hello, agent!\n/exit\n",

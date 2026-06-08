@@ -699,13 +699,9 @@ export async function startRepl(config: ReplConfig): Promise<void> {
 
   // ── Input handler ──────────────────────────────────────────────────
   const processInput = async (input: string) => {
+    // Empty/whitespace input is filtered out by the "line" handler before we
+    // get here, so `trimmed` is always non-empty.
     const trimmed = input.trim();
-    if (!trimmed) {
-      hr();
-      reprompt();
-      return;
-    }
-
     historyLines.push(trimmed);
 
     // ── REPL commands ────────────────────────────────────────────
@@ -861,10 +857,25 @@ Session stats:
 
   // ── Readline event handlers ────────────────────────────────────────
   rl.on("line", (line) => {
-    // On submit the cursor is on the input row with the bottom rule one row
-    // below it. Stop framing and step past the bottom rule so the reply (and
-    // the next framed prompt) render cleanly beneath the completed frame.
     frame.close();
+
+    // Empty or whitespace-only Enter is a no-op, like Claude: don't run a
+    // turn or scroll the transcript — just redraw the same prompt in place.
+    // The 3-row frame is (top rule / input / bottom rule); after Enter the
+    // cursor is on the bottom rule, so move up 2 to the top rule and clear
+    // down before repainting, leaving a single frame rather than stacking.
+    if (!line.trim()) {
+      if (process.stdout.isTTY) {
+        process.stdout.write("\x1b[2A\x1b[0J");
+        reprompt();
+      } else {
+        reprompt();
+      }
+      return;
+    }
+
+    // Real input: step past the bottom rule so the reply (and the next framed
+    // prompt) render cleanly beneath the completed frame.
     if (process.stdout.isTTY) process.stdout.write("\n");
     processInput(line).catch((err) => {
       console.error(`REPL error: ${err.message}`);
