@@ -641,7 +641,25 @@ export async function startRepl(config: ReplConfig): Promise<void> {
         : { role: "system", content: config.systemPrompt }
       : {
           role: "system",
-          content: `You are Helm, an AI assistant powered by ${config.providerName}. You are helpful, concise, and honest.`,
+          content:
+            `You are Helm, an AI assistant powered by ${config.providerName}. ` +
+            `You are helpful, concise, and honest.\n\n` +
+            // Reply formatting — steer toward natural prose, not Markdown.
+            // The model only *looks* like it "outputs Markdown" because it
+            // tends to generate Markdown-style text; instructing it to write
+            // flowing paragraphs (positive framing, per Anthropic's guidance)
+            // is more reliable than a bare "don't use Markdown".
+            `<response_format>\n` +
+            `Write your replies as flowing, natural paragraphs of plain prose.\n` +
+            `Organize information with ordinary sentences and paragraph breaks.\n` +
+            `Weave any points into the prose ("First… Second… Also…") rather than ` +
+            `breaking them into bullet or numbered lists.\n` +
+            `Do not use Markdown formatting: no "#" headings, no "-"/"*" bullets, ` +
+            `no numbered lists, no **bold** or *italics*, no ">" quotes, no tables.\n` +
+            `Only use fenced code blocks when the user explicitly asks for code or ` +
+            `a command; keep ordinary explanations in prose.\n` +
+            `Keep the tone clear, direct, and measured.\n` +
+            `</response_format>`,
         };
 
   let messageHistory: MessageRecord[] = SYSTEM_MESSAGE
