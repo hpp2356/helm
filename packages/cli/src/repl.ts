@@ -317,30 +317,66 @@ function hr(): void {
   console.log();
 }
 
-/** Outer width shared by the welcome box and the input box, so edges align. */
+/** Outer width shared by the welcome box and the input frame, so edges align. */
 function boxOuterWidth(): number {
-  const cols = process.stdout.columns ?? 80;
-  return Math.min(cols - 1, 78);
+  const cols = process.stdout.columns || 80; // 0/undefined → fall back to 80
+  return Math.max(8, Math.min(cols - 1, 78));
 }
 
-/** Inner width (between the vertical borders) of the input box. */
-function boxInnerWidth(): number {
-  return Math.max(8, boxOuterWidth() - 2);
+/** A full-width horizontal rule used as the top/bottom edge of the input frame. */
+function frameRule(): string {
+  return DIM + "─".repeat(boxOuterWidth()) + RESET;
 }
 
 /**
- * The readline prompt string for the input box: a top border, then the left
- * border + `›` caret on the next line. readline rewrites only this last row as
- * the user types, so the top border survives editing.
+ * The readline prompt: a top rule, then the `›` caret on the next line.
+ * readline only repaints this last row as the user types, so the top rule
+ * stays put. The matching bottom rule is kept anchored below the cursor by
+ * {@link InputFrame}.
  */
-function boxedPrompt(): string {
-  const top = DIM + "╭" + "─".repeat(boxInnerWidth()) + "╮" + RESET;
-  return top + "\n" + DIM + "│" + RESET + " " + BOLD + ORANGE + "›" + RESET + " ";
+function framedPrompt(): string {
+  return frameRule() + "\n" + BOLD + ORANGE + "› " + RESET;
 }
 
-/** Bottom border of the input box, printed once a line is submitted. */
-function closeBox(): void {
-  console.log(DIM + "╰" + "─".repeat(boxInnerWidth()) + "╯" + RESET);
+/**
+ * Keeps a bottom rule painted one row below the readline input. readline clears
+ * everything beneath the cursor on each keystroke, so we re-paint the rule
+ * after each keypress using save/restore-cursor: the input row ends up bracketed
+ * by two rules (top + bottom), both visible the whole time the user is typing —
+ * Claude-style.
+ */
+class InputFrame {
+  private active = false;
+  private readonly onKeypress = () => {
+    if (this.active) setImmediate(() => this.paintBottom());
+  };
+
+  attach(): void {
+    if (process.stdin.isTTY) {
+      process.stdin.on("keypress", this.onKeypress);
+    }
+  }
+
+  detach(): void {
+    process.stdin.off("keypress", this.onKeypress);
+  }
+
+  /** Begin framing: caller has just issued the prompt; draw the bottom rule. */
+  open(): void {
+    this.active = true;
+    this.paintBottom();
+  }
+
+  /** Stop framing (e.g. while a turn runs / on submit) without redrawing. */
+  close(): void {
+    this.active = false;
+  }
+
+  private paintBottom(): void {
+    if (!this.active || !process.stdout.isTTY) return;
+    // Save cursor (on the input row) → newline + bottom rule → restore cursor.
+    process.stdout.write("\x1b7\n" + frameRule() + "\x1b8");
+  }
 }
 
 /**
@@ -586,6 +622,17 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     terminal: true,
   });
 
+  // Bottom-anchored input frame (top + bottom rules around the `›` prompt).
+  const frame = new InputFrame();
+  frame.attach();
+
+  /** Issue a fresh framed prompt: top rule + caret, then anchor the bottom rule. */
+  const reprompt = (): void => {
+    rl.setPrompt(framedPrompt());
+    rl.prompt();
+    frame.open();
+  };
+
   // ── REPL state ─────────────────────────────────────────────────────
   const SYSTEM_MESSAGE: MessageRecord | null =
     config.systemPrompt !== undefined
@@ -630,15 +677,14 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   );
   console.log();
 
-  rl.setPrompt(boxedPrompt());
-  rl.prompt();
+  reprompt();
 
   // ── Input handler ──────────────────────────────────────────────────
   const processInput = async (input: string) => {
     const trimmed = input.trim();
     if (!trimmed) {
       hr();
-      rl.prompt();
+      reprompt();
       return;
     }
 
@@ -663,7 +709,7 @@ export async function startRepl(config: ReplConfig): Promise<void> {
           turnCount = 0;
           console.log(DIM + "Conversation history cleared." + RESET);
           hr();
-          rl.prompt();
+          reprompt();
           return;
 
         case "/help":
@@ -677,7 +723,7 @@ Commands:
 
 Press Enter to send. Ctrl-C to interrupt current turn.`);
           hr();
-          rl.prompt();
+          reprompt();
           return;
 
         case "/stats":
@@ -688,7 +734,7 @@ Session stats:
   Provider: ${config.providerName}
   Journal:  ${journalPath}`);
           hr();
-          rl.prompt();
+          reprompt();
           return;
 
         case "/mode": {
@@ -711,14 +757,14 @@ Session stats:
             );
           }
           hr();
-          rl.prompt();
+          reprompt();
           return;
         }
 
         default:
           console.log(`Unknown command: ${cmd}. Type /help for help.`);
           hr();
-          rl.prompt();
+          reprompt();
           return;
       }
     }
@@ -792,22 +838,26 @@ Session stats:
     }
 
     hr();
-    rl.prompt();
+    reprompt();
   };
 
   // ── Readline event handlers ────────────────────────────────────────
   rl.on("line", (line) => {
-    // Close the input box (bottom border) the moment a line is submitted, so
-    // every downstream path renders below a complete frame.
-    closeBox();
+    // On submit the cursor is on the input row with the bottom rule one row
+    // below it. Stop framing and step past the bottom rule so the reply (and
+    // the next framed prompt) render cleanly beneath the completed frame.
+    frame.close();
+    if (process.stdout.isTTY) process.stdout.write("\n");
     processInput(line).catch((err) => {
       console.error(`REPL error: ${err.message}`);
       hr();
-      rl.prompt();
+      reprompt();
     });
   });
 
   rl.on("close", () => {
+    frame.close();
+    frame.detach();
     try {
       const dir = process.env.HOME ?? "/tmp";
       writeFileSync(
