@@ -20,6 +20,27 @@ import {
 } from "@helm/runtime";
 import { registerFileTools } from "@helm/runtime";
 import type { Provider } from "@helm/core";
+import {
+  PasteBuffer,
+  pastePlaceholder,
+  expandPastes,
+  BRACKETED_PASTE_ON,
+  BRACKETED_PASTE_OFF,
+} from "./paste.js";
+import { theme } from "./theme.js";
+import { InputFrame } from "./input-frame.js";
+import { renderStatusBar } from "./status-bar.js";
+import { sanitize, isBinary, collapseOutput } from "./sanitize.js";
+import { TurnStateMachine } from "./state-machine.js";
+import {
+  renderAssistantCard,
+  renderToolCard,
+  renderErrorCard,
+  renderSystemNotice,
+  pickVerb,
+} from "./transcript.js";
+import { loadKeybindings } from "./keybindings.js";
+import { openExternalEditor } from "./editor.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -46,47 +67,15 @@ interface PermRule {
   description: string;
 }
 
-// ── ANSI helpers ──────────────────────────────────────────────────────────
+// ── Constants ──────────────────────────────────────────────────────────────
 
-const RESET = "\x1b[0m";
-const BOLD = "\x1b[1m";
-const DIM = "\x1b[2m";
-const ITALIC = "\x1b[3m";
-const PINK = "\x1b[38;5;211m"; // mascot + section headers
-const ORANGE = "\x1b[38;5;215m"; // box border
+const HELM_HISTORY_FILE = `${process.env.HOME || "~"}/.helm_history`;
 
-/** Whimsical past-tense verbs for the post-turn timing footer (Claude-style). */
-const WORK_VERBS = [
-  "Cooked",
-  "Baked",
-  "Brewed",
-  "Simmered",
-  "Forged",
-  "Conjured",
-  "Pondered",
-  "Mulled",
-  "Crafted",
-  "Whipped up",
-];
-
-/** Animated star glyphs for the in-progress spinner. */
 const SPIN_FRAMES = ["✶", "✷", "✸", "✹", "✺", "✹", "✸", "✷"];
-
-/** Whimsical gerunds shown next to the spinner while a turn runs. */
 const SPIN_VERBS = [
-  "Razzmatazzing",
-  "Conjuring",
-  "Percolating",
-  "Marinating",
-  "Noodling",
-  "Tinkering",
-  "Finagling",
-  "Cogitating",
-  "Simmering",
-  "Hustling",
+  "Razzmatazzing", "Conjuring", "Percolating", "Marinating",
+  "Noodling", "Tinkering", "Finagling", "Cogitating",
 ];
-
-/** Rotating tips shown under the spinner (Helm-specific, not Claude's). */
 const SPIN_TIPS = [
   "Press Ctrl-C to interrupt the current turn",
   "Type /help for the full command list",
@@ -96,433 +85,160 @@ const SPIN_TIPS = [
   "/stats shows messages, turns, and the journal path",
 ];
 
-/** Visible length of a string, ignoring ANSI escape codes. */
+// ── Helpers ────────────────────────────────────────────────────────────────
+
 function visLen(s: string): number {
   return s.replace(/\x1b\[[0-9;]*m/g, "").length;
 }
 
-/** Right-pad a string to a visible width (ANSI-aware). */
 function padVis(s: string, width: number): string {
   return s + " ".repeat(Math.max(0, width - visLen(s)));
 }
 
-/** Minimal ANSI Markdown renderer for terminal display. */
-function renderMd(text: string): string {
-  let out = "";
-  let i = 0;
-
-  while (i < text.length) {
-    // Code fences
-    if (
-      text.startsWith("```", i) &&
-      (i === 0 || text[i - 1] === "\n")
-    ) {
-      const end = text.indexOf("```", i + 3);
-      if (end !== -1) {
-        const code = text.slice(i + 3, end).replace(/^\n/, "");
-        out += DIM + "  │ " + code.replace(/\n/g, "\n  │ ") + RESET + "\n";
-        i = end + 3;
-        continue;
-      }
-    }
-
-    // Inline code
-    if (text[i] === "`" && text[i + 1] !== "`") {
-      const end = text.indexOf("`", i + 1);
-      if (end !== -1) {
-        out += DIM + text.slice(i + 1, end) + RESET;
-        i = end + 1;
-        continue;
-      }
-    }
-
-    // Bold
-    if (text.startsWith("**")) {
-      const end = text.indexOf("**", i + 2);
-      if (end !== -1) {
-        out += BOLD + text.slice(i + 2, end) + RESET;
-        i = end + 2;
-        continue;
-      }
-    }
-
-    // List marker
-    if (
-      (text[i] === "-" || text[i] === "*") &&
-      (i === 0 || text[i - 1] === "\n") &&
-      text[i + 1] === " "
-    ) {
-      out += "  • ";
-      i += 2;
-      continue;
-    }
-
-    // Numbered list
-    if (
-      /\d/.test(text[i]) &&
-      (i === 0 || text[i - 1] === "\n")
-    ) {
-      const rest = text.slice(i);
-      const m = rest.match(/^(\d+)\.\s/);
-      if (m) {
-        out += `  ${m[1]}. `;
-        i += m[0].length;
-        continue;
-      }
-    }
-
-    // Heading
-    if (text.startsWith("### ")) {
-      i += 4;
-      const end = text.indexOf("\n", i);
-      out +=
-        "\n" +
-        BOLD +
-        (end !== -1 ? text.slice(i, end) : text.slice(i)) +
-        RESET +
-        "\n";
-      i = end !== -1 ? end : text.length;
-      continue;
-    }
-    if (text.startsWith("## ") && !text.startsWith("### ")) {
-      i += 3;
-      const end = text.indexOf("\n", i);
-      out +=
-        "\n" +
-        BOLD +
-        (end !== -1 ? text.slice(i, end) : text.slice(i)) +
-        RESET +
-        "\n";
-      i = end !== -1 ? end : text.length;
-      continue;
-    }
-
-    out += text[i];
-    i++;
+function truncVis(s: string, width: number): string {
+  if (visLen(s) <= width) return s;
+  let out = ""; let vis = 0; let i = 0;
+  while (i < s.length && vis < width - 1) {
+    const esc = s.slice(i).match(/^\x1b\[[0-9;]*m/);
+    if (esc) { out += esc[0]; i += esc[0].length; continue; }
+    out += s[i]; vis++; i++;
   }
-
-  return out;
+  return out + theme.reset + "…";
 }
 
-// ── Constants ──────────────────────────────────────────────────────────────
+function termCols(): number {
+  return process.stdout.columns || 80;
+}
 
-const HELM_HISTORY_FILE = `${process.env.HOME || "~"}/.helm_history`;
+function loadJson<T>(path: string): T {
+  const fullPath = resolve(path);
+  if (!existsSync(fullPath)) throw new Error(`File not found: ${fullPath}`);
+  return JSON.parse(readFileSync(fullPath, "utf-8")) as T;
+}
 
-/** CLI version, read from the package manifest (best-effort). */
+function hr(): void { console.log(); }
+
 function helmVersion(): string {
-  // Compiled to dist/src/repl.js, so the manifest is two levels up; source
-  // layout puts it one level up. Try both.
   for (const rel of ["../../package.json", "../package.json"]) {
     try {
       const pkg = new URL(rel, import.meta.url);
       const v = JSON.parse(readFileSync(pkg, "utf-8")).version;
       if (v) return v;
-    } catch {
-      // try next candidate
-    }
+    } catch { /* try next */ }
   }
   return "0.0.0";
 }
 
-/** Truncate to a visible width, appending an ellipsis when shortened. */
-function truncVis(s: string, width: number): string {
-  if (visLen(s) <= width) return s;
-  // Walk codepoints, copying ANSI escapes verbatim, until we hit width-1.
-  let out = "";
-  let vis = 0;
-  let i = 0;
-  while (i < s.length && vis < width - 1) {
-    const esc = s.slice(i).match(/^\x1b\[[0-9;]*m/);
-    if (esc) {
-      out += esc[0];
-      i += esc[0].length;
-      continue;
-    }
-    out += s[i];
-    vis++;
-    i++;
-  }
-  return out + RESET + "…";
-}
+// ── Welcome Box ────────────────────────────────────────────────────────────
 
-/** Small pixel-art mascot, rendered in pink like Claude's. */
 const MASCOT = ["  ▐▛▀▜▌  ", "  ▐▌◣◢▐▌ ", "  ▝▜▄▟▘  "];
 
-/**
- * Render a Claude-style rounded welcome box with the title embedded in the
- * top border, a two-column body (mascot + greeting | tips) split by a vertical
- * divider, and a footer line for the working directory.
- */
-function renderWelcomeBox(opts: {
-  title: string;
-  greeting: string;
-  cwd: string;
-  tips: string[];
-}): string {
-  const width = boxOuterWidth();
-  const inner = width - 2; // space between the two vertical borders
-
-  // Left column holds the mascot + greeting; right column holds the tips.
-  const leftW = 22;
-  const gapW = 3; // " │ "
-  const rightW = inner - leftW - gapW;
-
-  const left: string[] = [
-    "",
-    ...MASCOT.map((m) => PINK + padVis(m, 9) + RESET),
-    "",
-    `   ${BOLD}${opts.greeting}${RESET}`,
-    "",
-  ];
-  const right: string[] = [`${BOLD}${PINK}Session${RESET}`, ...opts.tips];
-
+function renderWelcomeBox(opts: { title: string; greeting: string; cwd: string; tips: string[] }): string {
+  const width = Math.max(8, Math.min(termCols() - 1, 78));
+  const inner = width - 2;
+  const leftW = 22; const gapW = 3; const rightW = inner - leftW - gapW;
+  const left: string[] = ["", ...MASCOT.map((m) => theme.accent(padVis(m, 9))), "", `   ${theme.bold(opts.greeting)}`, ""];
+  const right: string[] = [`${theme.bold(theme.accent("Session"))}`, ...opts.tips];
   const rows = Math.max(left.length, right.length);
   const lines: string[] = [];
-
-  // Top border with embedded title: ╭─ Helm vX ──────╮
-  const titleSeg = `─ ${BOLD}${opts.title}${RESET}${ORANGE} `;
+  const titleSeg = `─ ${theme.bold(opts.title)}${theme.border(" ")}`;
   const dashes = inner - visLen(titleSeg);
-  lines.push(
-    ORANGE + "╭" + titleSeg + "─".repeat(Math.max(0, dashes)) + "╮" + RESET,
-  );
-
+  lines.push(theme.border("╭") + titleSeg + theme.border("─".repeat(Math.max(0, dashes)) + "╮"));
   for (let r = 0; r < rows; r++) {
     const l = padVis(truncVis(left[r] ?? "", leftW), leftW);
-    const sep = DIM + "│" + RESET;
+    const sep = theme.dim("│");
     const rt = padVis(truncVis(right[r] ?? "", rightW), rightW);
-    lines.push(
-      ORANGE + "│" + RESET + " " + l + " " + sep + " " + rt + ORANGE + "│" + RESET,
-    );
+    lines.push(theme.border("│") + " " + l + " " + sep + " " + rt + theme.border("│"));
   }
-
-  lines.push(ORANGE + "╰" + "─".repeat(inner) + "╯" + RESET);
-  lines.push("");
-  lines.push(DIM + opts.cwd + RESET);
-
+  lines.push(theme.border("╰" + "─".repeat(inner) + "╯"));
+  lines.push(""); lines.push(theme.dim(opts.cwd));
   return lines.join("\n");
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+// ── Spinner ────────────────────────────────────────────────────────────────
 
-function loadJson<T>(path: string): T {
-  const fullPath = resolve(path);
-  if (!existsSync(fullPath)) {
-    throw new Error(`File not found: ${fullPath}`);
-  }
-  return JSON.parse(readFileSync(fullPath, "utf-8")) as T;
-}
-
-/** Blank-line separator between a turn's output and the next prompt. */
-function hr(): void {
-  console.log();
-}
-
-/** Current terminal width in columns, with a fallback when it's unknown. */
-function termCols(): number {
-  return process.stdout.columns || 80; // 0/undefined → fall back to 80
-}
-
-/**
- * Width of the welcome card. Kept a tidy, bounded box (capped at 78) rather
- * than stretching across very wide terminals — like Claude's startup card.
- */
-function boxOuterWidth(): number {
-  return Math.max(8, Math.min(termCols() - 1, 78));
-}
-
-/**
- * Width of the prompt divider rule. Fills the terminal (minus one column to
- * avoid wrapping a full-width rule onto the next row), so the dividers span the
- * whole window like Claude's.
- */
-function frameWidth(): number {
-  return Math.max(8, termCols() - 1);
-}
-
-/** A full-width horizontal rule used as the prompt's divider. */
-function frameRule(): string {
-  return DIM + "─".repeat(frameWidth()) + RESET;
-}
-
-/** The caret shown on the input row. */
-const CARET = BOLD + ORANGE + "› " + RESET;
-
-/**
- * The input is bracketed by two rules — a top rule and a bottom rule — both
- * visible the whole time you type, Claude-style.
- *
- * Crucial design point learned the hard way: readline's prompt is kept to a
- * SINGLE row (just the caret). We never put a rule inside the prompt, because
- * a wide rule wraps when the window narrows, and readline then miscounts the
- * prompt's height on resize and stacks orphaned copies. Instead:
- *   • the TOP rule is printed once when the prompt opens and never touched again
- *     (readline only ever clears downward, so typing can't disturb it, and we
- *     deliberately do NOT repaint it on resize — repainting anything above the
- *     input fights the terminal's scrollback reflow);
- *   • the BOTTOM rule lives one row below the input (never in reflow history),
- *     painted with save/restore-cursor (ESC 7 / ESC 8) so it never scrolls and
- *     is immune to CJK column-width math. It's repainted on each keystroke and
- *     on resize, so it always matches the current width.
- */
-class InputFrame {
-  private active = false;
-  private repaintQueued = false;
-  // Both keypress and resize repaints are deferred and coalesced. readline runs
-  // its OWN handler for these (reprinting the prompt and moving the cursor); if
-  // we paint synchronously mid-reprint, the save→down→draw lands a row off and
-  // orphans a stray rule fragment. Deferring to a microtask lets readline
-  // settle the cursor on the input row first, and the queue flag collapses a
-  // resize burst into a single paint at the final width.
-  private readonly schedulePaint = () => {
-    if (!this.active || this.repaintQueued) return;
-    this.repaintQueued = true;
-    setImmediate(() => {
-      this.repaintQueued = false;
-      this.paintBottom();
-    });
-  };
-
-  attach(): void {
-    if (!process.stdout.isTTY) return;
-    process.stdin.on("keypress", this.schedulePaint);
-    process.stdout.on("resize", this.schedulePaint);
-  }
-
-  detach(): void {
-    process.stdin.off("keypress", this.schedulePaint);
-    process.stdout.off("resize", this.schedulePaint);
-  }
-
-  /**
-   * Open a fresh frame: top rule, the caret row (issued via the supplied
-   * prompt callback), then the bottom rule one line below.
-   */
-  open(prompt: () => void): void {
-    if (!process.stdout.isTTY) {
-      prompt();
-      return;
-    }
-    // 1) Top rule on its own row, then step onto the input row.
-    // 2) Reserve the bottom row with a real newline FIRST — this is the only
-    //    place a scroll is allowed (when the prompt is at the screen bottom).
-    //    Doing it now means paintBottom's later cursor-down never scrolls, so
-    //    its save/restore (ESC 7 / ESC 8) stays valid.
-    // 3) Return to the input row and let readline draw the caret there.
-    process.stdout.write(frameRule() + "\n"); // top rule + onto input row
-    process.stdout.write("\n\x1b[1A"); // reserve row below, back to input row
-    prompt(); // caret on the input row; cursor ends up just after it
-    this.active = true;
-    this.paintBottom(); // draw the bottom rule, leaving the cursor put
-  }
-
-  /** Stop framing (on submit / while a turn runs) without redrawing. */
-  close(): void {
-    this.active = false;
-  }
-
-  private paintBottom(): void {
-    if (!this.active || !process.stdout.isTTY) return;
-    // Save cursor → move DOWN one row (never a newline, so it never scrolls) →
-    // clear that row → draw the bottom rule at the current width → restore.
-    process.stdout.write("\x1b7\x1b[1B\r\x1b[2K" + frameRule() + "\x1b8");
-  }
-}
-
-/**
- * Render an assistant reply Claude-style: a `●` bullet on the first line, the
- * Markdown-rendered body, and continuation lines indented to align under it.
- */
-function renderReply(content: string): string {
-  const body = renderMd(content.trim());
-  const lines = body.split("\n");
-  const out = lines.map((l, idx) =>
-    idx === 0 ? `${BOLD}●${RESET} ${l}` : `  ${l}`,
-  );
-  return out.join("\n");
-}
-
-/** Dim `✻ <verb> for Ns` footer shown after each completed turn. */
-function renderTimingFooter(ms: number, verb: string): string {
-  const secs = Math.max(1, Math.round(ms / 1000));
-  return DIM + `✻ ${verb} for ${secs}s` + RESET;
-}
-
-/**
- * A two-line in-progress indicator shown while a turn runs: an animated star
- * with a whimsical gerund, and a dim `└ Tip:` line beneath it. Clears itself
- * (erasing both lines) when the turn completes, so the reply renders in place.
- */
 class Spinner {
   private timer: ReturnType<typeof setInterval> | null = null;
   private frame = 0;
-  private readonly verb: string;
-  private readonly tip: string;
   private drawn = false;
-
-  constructor(verb: string, tip: string) {
-    this.verb = verb;
-    this.tip = tip;
-  }
+  constructor(private readonly verb: string, private readonly tip: string) {}
 
   start(): void {
-    if (!process.stdout.isTTY) return; // no animation when piped
+    if (!process.stdout.isTTY) return;
     this.render();
-    this.timer = setInterval(() => {
-      this.frame = (this.frame + 1) % SPIN_FRAMES.length;
-      this.redraw();
-    }, 120);
-    // Don't let the interval keep the event loop alive on its own.
+    this.timer = setInterval(() => { this.frame = (this.frame + 1) % SPIN_FRAMES.length; this.redraw(); }, 120);
     this.timer.unref?.();
   }
 
   private render(): void {
-    const star = SPIN_FRAMES[this.frame]!;
-    process.stdout.write(PINK + star + RESET + " " + DIM + this.verb + "…" + RESET + "\n");
-    process.stdout.write(DIM + "  └ Tip: " + this.tip + RESET + "\n");
+    process.stdout.write(theme.accent(SPIN_FRAMES[this.frame]!) + " " + theme.dim(this.verb + "…") + "\n");
+    process.stdout.write(theme.dim("  └ Tip: " + this.tip) + "\n");
     this.drawn = true;
   }
 
   private redraw(): void {
     if (!this.drawn) return;
-    // Move up two lines, clear from cursor down, re-render.
     process.stdout.write("\x1b[2A\x1b[0J");
     this.render();
   }
 
   stop(): void {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
-    if (this.drawn && process.stdout.isTTY) {
-      // Erase the two spinner lines so the reply takes their place.
-      process.stdout.write("\x1b[2A\x1b[0J");
-      this.drawn = false;
-    }
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    if (this.drawn && process.stdout.isTTY) { process.stdout.write("\x1b[2A\x1b[0J"); this.drawn = false; }
   }
 
-  /** Print a line above the spinner (e.g. tool output), then redraw it. */
   printAbove(line: string): void {
-    if (this.drawn && process.stdout.isTTY) {
-      process.stdout.write("\x1b[2A\x1b[0J");
-      console.log(line);
-      this.render();
-    } else {
-      console.log(line);
-    }
+    if (this.drawn && process.stdout.isTTY) { process.stdout.write("\x1b[2A\x1b[0J"); console.log(line); this.render(); }
+    else console.log(line);
   }
 }
 
-/** The spinner for the turn currently in flight, if any. */
 let activeSpinner: Spinner | null = null;
 
-/** Print a line, routing above the active spinner when one is running. */
 function emit(line: string): void {
-  if (activeSpinner) {
-    activeSpinner.printAbove(line);
-  } else {
-    console.log(line);
-  }
+  if (activeSpinner) activeSpinner.printAbove(line);
+  else console.log(line);
+}
+
+// ── Status Bar ─────────────────────────────────────────────────────────────
+
+interface StatusState {
+  model: string;
+  mode: string;
+  contextPct: number;
+  cost: number | null;
+  durationMs: number;
+  currentTool: string | null;
+  bgTasks: number;
+  turnStart: number;
+}
+
+let statusState: StatusState = {
+  model: "", mode: "interactive", contextPct: 0,
+  cost: null, durationMs: 0, currentTool: null, bgTasks: 0, turnStart: 0,
+};
+let statusTimer: ReturnType<typeof setInterval> | null = null;
+let statusPaused = false;
+
+function paintStatusBar(): void {
+  if (statusPaused || !process.stdout.isTTY) return;
+  const cols = termCols();
+  const bar = renderStatusBar({ theme, cols, ...statusState });
+  // Status bar sits above Composer top rule: save → up 2 → col 0 → clear line → draw → restore
+  process.stdout.write("\x1b7\x1b[2A\r\x1b[2K" + bar + "\x1b8");
+}
+
+function startStatusTimer(): void {
+  if (statusTimer) return;
+  statusTimer = setInterval(() => {
+    if (statusState.turnStart > 0) statusState.durationMs = Date.now() - statusState.turnStart;
+    paintStatusBar();
+  }, 1000);
+  statusTimer.unref?.();
+}
+
+function stopStatusTimer(): void {
+  if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
 }
 
 // ── REPL ───────────────────────────────────────────────────────────────────
@@ -533,419 +249,387 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   const journal = new JsonlJournal(journalPath);
   await journal.open();
 
-  // ── Build permissions ──────────────────────────────────────────────
+  loadKeybindings(); // load user keybindings (currently unused in keypress handler below, but warms the registry)
+  const sm = new TurnStateMachine();
+
+  // ── Permissions ──────────────────────────────────────────────────────
   const permissionRuntime = new PermissionRuntime();
   let permissionPolicy: PermissionPolicy | undefined;
-
   if (config.permsPath) {
     const permRules = loadJson<PermRule[]>(config.permsPath);
     for (const rule of permRules) {
       if (rule.action === "deny") {
-        permissionRuntime.deny({
-          pattern: rule.pattern,
-          riskLevel: RiskLevel[rule.riskLevel],
-          description: rule.description,
-        });
+        permissionRuntime.deny({ pattern: rule.pattern, riskLevel: RiskLevel[rule.riskLevel], description: rule.description });
       } else {
-        permissionRuntime.allow({
-          pattern: rule.pattern,
-          riskLevel: RiskLevel[rule.riskLevel],
-          description: rule.description,
-        });
+        permissionRuntime.allow({ pattern: rule.pattern, riskLevel: RiskLevel[rule.riskLevel], description: rule.description });
       }
     }
   }
-
   if (config.nonInteractive) {
-    permissionPolicy = {
-      strategy: config.nonInteractive,
-      riskThreshold: config.riskThreshold,
-    };
+    permissionPolicy = { strategy: config.nonInteractive, riskThreshold: config.riskThreshold };
   }
 
-  // ── Build tools ─────────────────────────────────────────────────────
+  // ── Tools ─────────────────────────────────────────────────────────────
   const toolRuntime = new ToolRuntime(permissionRuntime, permissionPolicy);
   const workspaceRoot = config.workspaceRoot ?? process.cwd();
-
   if (config.toolsPath) {
-    interface ToolDef {
-      name: string;
-      description: string;
-      parameters: Record<string, unknown>;
-      riskLevel?: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
-    }
+    interface ToolDef { name: string; description: string; parameters: Record<string, unknown>; riskLevel?: "LOW"|"MEDIUM"|"HIGH"|"CRITICAL"; }
     const toolDefs = loadJson<ToolDef[]>(config.toolsPath);
     for (const td of toolDefs) {
       toolRuntime.register({
-        name: td.name,
-        description: td.description,
-        parameters: td.parameters,
+        name: td.name, description: td.description, parameters: td.parameters,
         riskLevel: td.riskLevel ? RiskLevel[td.riskLevel] : undefined,
-        async execute(args: Record<string, unknown>) {
-          return JSON.stringify(
-            Object.entries(args).map(([k, v]) => `${k}=${v}`),
-          );
-        },
+        async execute(args) { return JSON.stringify(Object.entries(args).map(([k, v]) => `${k}=${v}`)); },
       });
     }
   } else {
     registerFileTools(toolRuntime, workspaceRoot);
     for (const tool of toolRuntime.list()) {
-      permissionRuntime.allow({
-        pattern: tool.name,
-        riskLevel: tool.riskLevel ?? RiskLevel.LOW,
-        description: `Built-in tool: ${tool.name}`,
-      });
+      permissionRuntime.allow({ pattern: tool.name, riskLevel: tool.riskLevel ?? RiskLevel.LOW, description: `Built-in tool: ${tool.name}` });
     }
   }
 
-  const provider = config.provider;
-
-  // ── Compaction ──────────────────────────────────────────────────────
+  // ── Compaction ────────────────────────────────────────────────────────
   let tokenBudget: TokenBudget | undefined;
   let compaction: Compaction | undefined;
   let contextBuilder: ContextBuilder | undefined;
-
   if (config.compaction) {
     const tokenCounter = new CharTokenCounter();
     contextBuilder = new ContextBuilder(tokenCounter);
-    const budgetMax = config.tokenBudgetMax ?? 4096;
-    tokenBudget = new TokenBudget(budgetMax);
-    compaction = new Compaction({
-      strategy: config.compaction,
-      tokenCounter,
-      keepRecentTurns: config.compactionKeepTurns,
-    });
+    tokenBudget = new TokenBudget(config.tokenBudgetMax ?? 4096);
+    compaction = new Compaction({ strategy: config.compaction, tokenCounter, keepRecentTurns: config.compactionKeepTurns });
   }
 
-  // ── Journal interceptor ─────────────────────────────────────────────
+  // ── Status bar initial state ──────────────────────────────────────────
+  statusState.model = config.providerName;
+  statusState.mode = config.nonInteractive ?? "interactive";
+
+  // ── Journal interceptor ───────────────────────────────────────────────
   const originalAppend = journal.append.bind(journal);
-  journal.append = async function (event) {
+  journal.append = async function(event) {
     const e = event as Record<string, unknown>;
     switch (e.type) {
-      case "tool:call":
-        emit(DIM + `  ⚙ ${e.toolName}` + RESET);
+      case "tool:call": {
+        const toolName = String(e.toolName ?? "");
+        statusState.currentTool = toolName;
+        paintStatusBar();
+        emit(renderToolCard({ name: toolName, success: true, durationMs: 0 }, theme));
         break;
+      }
       case "tool:result": {
-        const out = String(e.output ?? "");
-        const preview = out.length > 120 ? out.slice(0, 120) + "..." : out;
-        const icon = out.startsWith("Error:") ? "✗" : "✓";
-        emit(DIM + `  ${icon} ${preview}` + RESET);
+        const raw = String(e.output ?? "");
+        const out = isBinary(Buffer.from(raw))
+          ? "[Binary output]"
+          : sanitize(collapseOutput(raw).text);
+        const success = !raw.startsWith("Error:");
+        emit(renderToolCard({ name: String(e.toolName ?? ""), success, durationMs: 0, summary: out.slice(0, 80) }, theme));
+        statusState.currentTool = null;
+        paintStatusBar();
         break;
       }
       case "compaction":
-        emit(
-          DIM +
-            `  🗜  Compaction: msgs ${e.messageCountBefore}→${e.messageCountAfter}` +
-            RESET,
-        );
+        emit(renderSystemNotice(`Compaction: msgs ${e.messageCountBefore}→${e.messageCountAfter}`, theme));
         break;
       case "error":
-        emit(`  ✗ ${e.message}`);
+        emit(renderErrorCard(String(e.message), theme));
         break;
       case "run:cancelled":
-        emit(DIM + `  ⏹ Cancelled: ${e.reason}` + RESET);
+        emit(theme.dim(`⏹ Cancelled: ${e.reason}`));
         break;
     }
     await originalAppend(event);
   };
 
-  // ── History file ───────────────────────────────────────────────────
+  // ── History ───────────────────────────────────────────────────────────
   const historyLines: string[] = [];
   try {
     if (existsSync(HELM_HISTORY_FILE)) {
-      historyLines.push(
-        ...readFileSync(HELM_HISTORY_FILE, "utf-8")
-          .split("\n")
-          .filter((l) => l.trim()),
-      );
+      historyLines.push(...readFileSync(HELM_HISTORY_FILE, "utf-8").split("\n").filter((l) => l.trim()));
     }
-  } catch {
-    // Non-fatal
-  }
+  } catch { /* non-fatal */ }
 
-  // ── Readline setup ─────────────────────────────────────────────────
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    terminal: true,
-  });
-
-  // Two-rule input frame; owns its own keypress + resize repainting.
-  const frame = new InputFrame();
+  // ── Readline + frame ──────────────────────────────────────────────────
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+  const frame = new InputFrame(theme);
   frame.attach();
-  rl.setPrompt(CARET); // single-row prompt; the rules are drawn by the frame
+  rl.setPrompt(theme.bold(theme.accent("› ")));
 
-  /** Open a fresh framed prompt: top rule, caret row, bottom rule. */
   const reprompt = (): void => {
     frame.open(() => rl.prompt());
+    startStatusTimer();
+    paintStatusBar();
   };
 
-  // ── REPL state ─────────────────────────────────────────────────────
+  // ── Ctrl+X Ctrl+E chord state ─────────────────────────────────────────
+  let ctrlXPending = false;
+
+  // ── Bracketed paste ───────────────────────────────────────────────────
+  const paste = new PasteBuffer();
+  const pastedBlocks = new Map<string, string>();
+  const isTTY = process.stdout.isTTY === true;
+  if (isTTY) process.stdout.write(BRACKETED_PASTE_ON);
+
+  process.stdin.on("keypress", (_chunk, key?: { name?: string; ctrl?: boolean; shift?: boolean }) => {
+    if (!key) return;
+
+    if (key.name === "paste-start") { paste.start(); return; }
+    if (key.name === "paste-end") {
+      const { block, echoedRows } = paste.end(rl.line);
+      if (echoedRows === 0) return;
+      const placeholder = pastePlaceholder(block);
+      pastedBlocks.set(placeholder, block);
+      if (isTTY && echoedRows > 0) process.stdout.write(`\r\x1b[${echoedRows}A\x1b[0J`);
+      const rlI = rl as unknown as { line: string; cursor: number; _refreshLine: () => void };
+      rlI.line = placeholder; rlI.cursor = placeholder.length; rlI._refreshLine();
+      frame.repaint();
+      return;
+    }
+
+    // Ctrl+X Ctrl+E chord
+    if (key.ctrl && key.name === "x") { ctrlXPending = true; return; }
+    if (ctrlXPending) {
+      ctrlXPending = false;
+      if (key.ctrl && key.name === "e") {
+        const rlI = rl as unknown as { line: string; cursor: number; _refreshLine: () => void };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        openExternalEditor({
+          rl: rlI as any,
+          frame,
+          onStatusPause: () => { statusPaused = true; stopStatusTimer(); },
+          onStatusResume: () => { statusPaused = false; startStatusTimer(); paintStatusBar(); },
+        });
+        return;
+      }
+    }
+
+    // Tab completion for slash commands
+    if (key.name === "tab") {
+      const rlI = rl as unknown as { line: string; cursor: number; _refreshLine: () => void };
+      if (rlI.line.startsWith("/")) {
+        const matches = COMMANDS.filter((c) => c.startsWith(rlI.line));
+        if (matches.length === 1) {
+          rlI.line = matches[0]!; rlI.cursor = matches[0]!.length; rlI._refreshLine();
+        } else if (matches.length > 1) {
+          emit(theme.dim(matches.join("  ")));
+        }
+      }
+    }
+  });
+
+  // ── REPL state ────────────────────────────────────────────────────────
   const SYSTEM_MESSAGE: MessageRecord | null =
     config.systemPrompt !== undefined
-      ? config.systemPrompt === null
-        ? null
-        : { role: "system", content: config.systemPrompt }
-      : {
-          role: "system",
-          content:
-            `You are Helm, an AI assistant powered by ${config.providerName}. ` +
-            `You are helpful, concise, and honest.\n\n` +
-            // Reply formatting — steer toward natural prose, not Markdown.
-            // The model only *looks* like it "outputs Markdown" because it
-            // tends to generate Markdown-style text; instructing it to write
-            // flowing paragraphs (positive framing, per Anthropic's guidance)
-            // is more reliable than a bare "don't use Markdown".
-            `<response_format>\n` +
-            `Write your replies as flowing, natural paragraphs of plain prose.\n` +
-            `Organize information with ordinary sentences and paragraph breaks.\n` +
-            `Weave any points into the prose ("First… Second… Also…") rather than ` +
-            `breaking them into bullet or numbered lists.\n` +
-            `Do not use Markdown formatting: no "#" headings, no "-"/"*" bullets, ` +
-            `no numbered lists, no **bold** or *italics*, no ">" quotes, no tables.\n` +
-            `Only use fenced code blocks when the user explicitly asks for code or ` +
-            `a command; keep ordinary explanations in prose.\n` +
-            `Keep the tone clear, direct, and measured.\n` +
-            `</response_format>`,
+      ? config.systemPrompt === null ? null : { role: "system", content: config.systemPrompt }
+      : { role: "system", content:
+          `You are Helm, an AI assistant powered by ${config.providerName}. ` +
+          `You are helpful, concise, and honest.\n\n` +
+          `<response_format>\nWrite replies as flowing, natural paragraphs of plain prose.\n` +
+          `Do not use Markdown: no headings, no bullets, no **bold**, no tables.\n` +
+          `Only use fenced code blocks when the user asks for code.\n` +
+          `</response_format>`,
         };
 
-  let messageHistory: MessageRecord[] = SYSTEM_MESSAGE
-    ? [SYSTEM_MESSAGE]
-    : [];
+  let messageHistory: MessageRecord[] = SYSTEM_MESSAGE ? [SYSTEM_MESSAGE] : [];
   let turnCount = 0;
 
-  // ── Startup display ─────────────────────────────────────────────────
+  // ── Welcome box ───────────────────────────────────────────────────────
   const home = process.env.HOME ?? "";
-  const tilde = (p: string): string =>
-    home && p.startsWith(home) ? "~" + p.slice(home.length) : p;
-
+  const tilde = (p: string): string => home && p.startsWith(home) ? "~" + p.slice(home.length) : p;
   const toolNames = toolRuntime.getToolNames();
   const tips: string[] = [
-    `${DIM}Provider${RESET}  ${config.providerName}`,
-    `${DIM}Tools${RESET}     ${toolNames.length}`,
+    `${theme.dim("Provider")}  ${config.providerName}`,
+    `${theme.dim("Tools")}     ${toolNames.length}`,
   ];
-  if (config.configPath) {
-    tips.push(`${DIM}Config${RESET}    ${tilde(config.configPath)}`);
-  }
-  tips.push(`${DIM}Journal${RESET}   ${tilde(journalPath)}`);
+  if (config.configPath) tips.push(`${theme.dim("Config")}    ${tilde(config.configPath)}`);
+  tips.push(`${theme.dim("Journal")}   ${tilde(journalPath)}`);
   tips.push("");
-  tips.push(`${ITALIC}${DIM}/help for commands${RESET}`);
-
+  tips.push(theme.italic(theme.dim("/help for commands")));
   console.log();
-  console.log(
-    renderWelcomeBox({
-      title: `Helm v${helmVersion()}`,
-      greeting: "Welcome back!",
-      cwd: tilde(process.cwd()),
-      tips,
-    }),
-  );
+  console.log(renderWelcomeBox({ title: `Helm v${helmVersion()}`, greeting: "Welcome back!", cwd: tilde(process.cwd()), tips }));
   console.log();
-
   reprompt();
 
-  // ── Input handler ──────────────────────────────────────────────────
-  const processInput = async (input: string) => {
-    // Empty/whitespace input is filtered out by the "line" handler before we
-    // get here, so `trimmed` is always non-empty.
+  // ── Slash command registry ────────────────────────────────────────────
+  const COMMANDS = ["/exit", "/quit", "/q", "/clear", "/help", "/stats", "/mode", "/theme", "/compact", "/tools"];
+
+  const processInput = async (input: string): Promise<void> => {
     const trimmed = input.trim();
     historyLines.push(trimmed);
 
-    // ── REPL commands ────────────────────────────────────────────
     if (trimmed.startsWith("/")) {
       const parts = trimmed.split(/\s+/);
       const cmd = parts[0]!.toLowerCase();
-
       switch (cmd) {
-        case "/exit":
-        case "/quit":
-        case "/q": {
-          console.log(BOLD + "Goodbye." + RESET);
-          rl.close();
-          return;
-        }
+        case "/exit": case "/quit": case "/q":
+          console.log(theme.bold("Goodbye.")); rl.close(); return;
 
         case "/clear":
           messageHistory = SYSTEM_MESSAGE ? [{ ...SYSTEM_MESSAGE }] : [];
           turnCount = 0;
-          console.log(DIM + "Conversation history cleared." + RESET);
-          hr();
-          reprompt();
-          return;
+          console.log(theme.dim("Conversation history cleared."));
+          hr(); reprompt(); return;
 
         case "/help":
-          console.log(`
-Commands:
-  ${BOLD}/exit, /quit, /q${RESET}  — Exit REPL
-  ${BOLD}/clear${RESET}            — Clear conversation history
-  ${BOLD}/help${RESET}             — Show this help
-  ${BOLD}/stats${RESET}            — Show session stats
-  ${BOLD}/mode <strategy>${RESET}  — Switch non-interactive mode
-
-Press Enter to send. Ctrl-C to interrupt current turn.`);
-          hr();
-          reprompt();
-          return;
+          console.log(`\n${theme.bold("Commands:")}\n` +
+            `  ${theme.bold("/exit, /quit, /q")}  — 退出\n` +
+            `  ${theme.bold("/clear")}            — 清空对话历史\n` +
+            `  ${theme.bold("/stats")}            — Session 统计\n` +
+            `  ${theme.bold("/mode <strategy>")} — 切换权限策略 (auto-approve|auto-deny|risk-threshold)\n` +
+            `  ${theme.bold("/theme dark")}       — 切换主题\n` +
+            `  ${theme.bold("/compact")}          — 手动触发 compaction\n` +
+            `  ${theme.bold("/tools")}            — 列出已注册工具\n` +
+            `  ${theme.bold("/help")}             — 显示此帮助\n\n` +
+            `  Ctrl-C 中断 turn  │  Ctrl-D 退出  │  Ctrl-X Ctrl-E 外部编辑器`);
+          hr(); reprompt(); return;
 
         case "/stats":
-          console.log(`
-Session stats:
-  Messages: ${messageHistory.length}
-  Turns:    ${turnCount}
-  Provider: ${config.providerName}
-  Journal:  ${journalPath}`);
-          hr();
-          reprompt();
-          return;
+          console.log(`\n${theme.bold("Session stats:")}\n` +
+            `  Messages: ${messageHistory.length}\n  Turns:    ${turnCount}\n` +
+            `  Provider: ${config.providerName}\n  Journal:  ${journalPath}`);
+          hr(); reprompt(); return;
+
+        case "/tools": {
+          const names = toolRuntime.getToolNames();
+          console.log(`\n${theme.bold("Tools:")} ${names.length}\n` + names.map((n) => `  • ${n}`).join("\n"));
+          hr(); reprompt(); return;
+        }
+
+        case "/theme":
+          console.log(theme.dim("Theme: dark (only option in this version)"));
+          hr(); reprompt(); return;
+
+        case "/compact":
+          if (!compaction) { console.log(theme.dim("Compaction not configured.")); hr(); reprompt(); return; }
+          emit(renderSystemNotice("Manual compaction triggered", theme));
+          hr(); reprompt(); return;
 
         case "/mode": {
-          const strategy = parts[1];
-          if (
-            strategy === "auto-approve" ||
-            strategy === "auto-deny" ||
-            strategy === "risk-threshold"
-          ) {
-            const ni = strategy as NonInteractiveStrategy;
-            config.nonInteractive = ni;
-            permissionPolicy = {
-              strategy: ni,
-              riskThreshold: config.riskThreshold ?? RiskLevel.MEDIUM,
-            };
-            console.log(DIM + `Permission mode: ${ni}` + RESET);
+          const strategy = parts[1] as NonInteractiveStrategy | undefined;
+          if (strategy === "auto-approve" || strategy === "auto-deny" || strategy === "risk-threshold") {
+            config.nonInteractive = strategy;
+            permissionPolicy = { strategy, riskThreshold: config.riskThreshold ?? RiskLevel.MEDIUM };
+            statusState.mode = strategy;
+            paintStatusBar();
+            console.log(theme.dim(`Permission mode: ${strategy}`));
           } else {
-            console.log(
-              "Usage: /mode <auto-approve|auto-deny|risk-threshold>",
-            );
+            console.log("Usage: /mode <auto-approve|auto-deny|risk-threshold>");
           }
-          hr();
-          reprompt();
-          return;
+          hr(); reprompt(); return;
         }
 
         default:
           console.log(`Unknown command: ${cmd}. Type /help for help.`);
-          hr();
-          reprompt();
-          return;
+          hr(); reprompt(); return;
       }
     }
 
-    // ── Normal message → AgentLoop ────────────────────────────────
-    turnCount++;
-    const turnRunId = `${runId}-t${turnCount}`;
-
-    // Ctrl-C for this turn only
-    const turnController = new AbortController();
-    const prevSigint = process.listeners("SIGINT");
-    process.removeAllListeners("SIGINT");
-    process.once("SIGINT", () => {
-      activeSpinner?.stop();
-      console.log("\n" + DIM + "Interrupted." + RESET);
-      turnController.abort();
-    });
-
-    const turnStart = Date.now();
-    const spinner = new Spinner(
-      SPIN_VERBS[(turnCount - 1) % SPIN_VERBS.length]!,
-      SPIN_TIPS[(turnCount - 1) % SPIN_TIPS.length]!,
-    );
-    activeSpinner = spinner;
-    spinner.start();
-    try {
-      const loop = new AgentLoop(provider, toolRuntime, journal, {
-        maxTurns: config.maxTurns ?? 10,
-        signal: turnController.signal,
-        tokenBudget,
-        contextBuilder,
-        compaction,
-      });
-
-      const result = await loop.run(turnRunId, trimmed, messageHistory);
-
-      spinner.stop();
-      activeSpinner = null;
-
-      if (result.cancelled) {
-        console.log(DIM + `(Turn cancelled: ${result.cancelled.reason})` + RESET);
-      }
-
-      // Render the assistant reply with a ● bullet and Markdown body, then a
-      // dim timing footer — Claude-style. The full reply is buffered (no raw
-      // stream echo), so **bold**, lists, and code fences render properly.
-      const lastMessage = result.messages[result.messages.length - 1];
-      if (
-        lastMessage &&
-        lastMessage.role === "assistant" &&
-        lastMessage.content
-      ) {
-        console.log("\n" + renderReply(lastMessage.content) + "\n");
-        const verb = WORK_VERBS[(turnCount - 1) % WORK_VERBS.length]!;
-        console.log(renderTimingFooter(Date.now() - turnStart, verb));
-      }
-
-      messageHistory = result.messages;
-    } catch (err) {
-      console.log(
-        `  ✗ Error: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    } finally {
-      // Idempotent: clears the animation if any path skipped the stop above.
-      spinner.stop();
-      activeSpinner = null;
-      process.removeAllListeners("SIGINT");
-      for (const listener of prevSigint) {
-        process.on("SIGINT", listener);
-      }
-    }
-
-    hr();
-    reprompt();
-  };
-
-  // ── Readline event handlers ────────────────────────────────────────
-  rl.on("line", (line) => {
-    frame.close(); // stop keystroke/resize repaints for the submitted frame
-
-    // Empty or whitespace-only Enter is a no-op, like Claude: don't run a
-    // turn or scroll the transcript — just redraw the prompt in place. The
-    // frame is 3 rows (top rule / input / bottom rule); after Enter the cursor
-    // is on the bottom rule, so move up 2 to the top rule and clear down before
-    // repainting, leaving a single frame rather than stacking duplicates.
-    if (!line.trim()) {
-      if (process.stdout.isTTY) process.stdout.write("\x1b[2A\x1b[0J");
-      reprompt();
+    // ── Agent turn ─────────────────────────────────────────────────────
+    if (sm.state !== "idle") {
+      sm.enqueue(trimmed);
+      emit(theme.dim("⏳ Queued — waiting for current turn to finish"));
       return;
     }
 
-    // Real input: the cursor sits on the bottom rule; step past it so the reply
-    // renders below the now-complete frame (which becomes transcript).
-    if (process.stdout.isTTY) process.stdout.write("\n");
-    processInput(line).catch((err) => {
-      console.error(`REPL error: ${err.message}`);
-      hr();
+    turnCount++;
+    sm.send("sending");
+
+    const turnController = new AbortController();
+    const prevSigint = process.listeners("SIGINT") as ((...args: unknown[]) => void)[];
+    process.removeAllListeners("SIGINT");
+    process.once("SIGINT", () => {
+      activeSpinner?.stop();
+      console.log("\n" + theme.dim("Interrupted."));
+      sm.send("cancelling");
+      turnController.abort();
+    });
+
+    statusState.turnStart = Date.now();
+    statusState.durationMs = 0;
+    paintStatusBar();
+
+    const verb = SPIN_VERBS[(turnCount - 1) % SPIN_VERBS.length]!;
+    const tip = SPIN_TIPS[(turnCount - 1) % SPIN_TIPS.length]!;
+    const spinner = new Spinner(verb, tip);
+    activeSpinner = spinner;
+    spinner.start();
+
+    try {
+      sm.send("running");
+      const loop = new AgentLoop(config.provider, toolRuntime, journal, {
+        maxTurns: config.maxTurns ?? 10,
+        signal: turnController.signal,
+        tokenBudget, contextBuilder, compaction,
+      });
+
+      const result = await loop.run(`${runId}-t${turnCount}`, trimmed, messageHistory);
+      spinner.stop(); activeSpinner = null;
+      sm.send("completed");
+
+      if (result.cancelled) {
+        emit(theme.dim(`(Turn cancelled: ${result.cancelled.reason})`));
+      }
+
+      const lastMessage = result.messages[result.messages.length - 1];
+      if (lastMessage?.role === "assistant" && lastMessage.content) {
+        const durationMs = Date.now() - statusState.turnStart;
+        console.log("\n" + renderAssistantCard(lastMessage.content, durationMs, pickVerb(turnCount - 1), theme) + "\n");
+      }
+
+      messageHistory = result.messages;
+      statusState.durationMs = Date.now() - statusState.turnStart;
+      statusState.currentTool = null;
+      statusState.turnStart = 0;
+    } catch (err) {
+      spinner.stop(); activeSpinner = null;
+      sm.send("failed");
+      emit(renderErrorCard(err instanceof Error ? err.message : String(err), theme));
+    } finally {
+      sm.send("idle");
+      process.removeAllListeners("SIGINT");
+      for (const listener of prevSigint) process.on("SIGINT", listener);
+    }
+
+    hr();
+
+    const queued = sm.dequeue();
+    if (queued) {
       reprompt();
+      await processInput(queued);
+    } else {
+      reprompt();
+    }
+  };
+
+  // ── Readline events ───────────────────────────────────────────────────
+  rl.on("line", (line) => {
+    if (paste.pasting) { paste.pushInner(line); return; }
+    frame.close();
+
+    const expanded = pastedBlocks.size > 0 ? expandPastes(line, pastedBlocks) : line;
+    pastedBlocks.clear();
+
+    if (!expanded.trim()) {
+      if (process.stdout.isTTY) process.stdout.write("\x1b[2A\x1b[0J");
+      reprompt(); return;
+    }
+
+    if (process.stdout.isTTY) process.stdout.write("\n");
+    processInput(expanded).catch((err) => {
+      console.error(`REPL error: ${(err as Error).message}`);
+      hr(); reprompt();
     });
   });
 
   rl.on("close", () => {
     frame.detach();
+    stopStatusTimer();
+    if (isTTY) process.stdout.write(BRACKETED_PASTE_OFF);
     try {
-      const dir = process.env.HOME ?? "/tmp";
-      writeFileSync(
-        `${dir}/.helm_history`,
-        historyLines.slice(-500).join("\n"),
-        "utf-8",
-      );
-    } catch {
-      // Non-fatal
-    }
+      writeFileSync(`${process.env.HOME ?? "/tmp"}/.helm_history`, historyLines.slice(-500).join("\n"), "utf-8");
+    } catch { /* non-fatal */ }
     journal.close().catch(() => {});
-    console.log(DIM + `\nJournal → ${journalPath}` + RESET);
+    console.log(theme.dim(`\nJournal → ${journalPath}`));
   });
 
-  // ── Wait for close ─────────────────────────────────────────────────
-  return new Promise<void>((resolve) => {
-    rl.on("close", resolve);
-  });
+  return new Promise<void>((resolve) => { rl.on("close", resolve); });
 }
