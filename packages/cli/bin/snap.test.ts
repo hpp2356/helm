@@ -233,3 +233,40 @@ describe("transcript cards", () => {
     expect(result).toContain("ℹ");
   });
 });
+
+describe("status bar width breakpoints snapshots", () => {
+  it("60 cols: shows only model/ctx/dur, no mode", async () => {
+    const { renderStatusBar } = await import("../src/status-bar.js");
+    const { buildTheme } = await import("../src/theme.js");
+    const t = buildTheme("no-color");
+    const r = renderStatusBar({ theme: t, cols: 60, model: "deepseek-v4-flash", mode: "interactive", contextPct: 10, cost: null, durationMs: 0, currentTool: null, bgTasks: 0 });
+    expect(r).not.toContain("interactive");
+    expect(r).toContain("10%");
+  });
+
+  it("80 cols: shows model/mode/ctx/dur", async () => {
+    const { renderStatusBar } = await import("../src/status-bar.js");
+    const { buildTheme } = await import("../src/theme.js");
+    const t = buildTheme("no-color");
+    const r = renderStatusBar({ theme: t, cols: 80, model: "deepseek-v4-flash", mode: "interactive", contextPct: 10, cost: null, durationMs: 0, currentTool: null, bgTasks: 0 });
+    expect(r).toContain("interactive");
+    expect(r).toContain("10%");
+  });
+
+  it("100 cols: shows cost field", async () => {
+    const { renderStatusBar } = await import("../src/status-bar.js");
+    const { buildTheme } = await import("../src/theme.js");
+    const t = buildTheme("no-color");
+    const r = renderStatusBar({ theme: t, cols: 100, model: "deepseek-v4-flash", mode: "interactive", contextPct: 10, cost: null, durationMs: 0, currentTool: null, bgTasks: 0 });
+    expect(r).toContain("n/a");
+  });
+
+  it("120 cols: shows tool and bg tasks", async () => {
+    const { renderStatusBar } = await import("../src/status-bar.js");
+    const { buildTheme } = await import("../src/theme.js");
+    const t = buildTheme("no-color");
+    const r = renderStatusBar({ theme: t, cols: 120, model: "deepseek-v4-flash", mode: "interactive", contextPct: 10, cost: null, durationMs: 0, currentTool: "bash", bgTasks: 3 });
+    expect(r).toContain("bash");
+    expect(r).toContain("3bg");
+  });
+});
