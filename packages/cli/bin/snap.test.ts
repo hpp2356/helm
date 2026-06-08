@@ -184,3 +184,52 @@ describe("TurnStateMachine", () => {
     expect(events).toEqual(["sending"]); // not "running"
   });
 });
+
+describe("transcript cards", () => {
+  it("renders user card", async () => {
+    const { renderUserCard } = await import("../src/transcript.js");
+    const { buildTheme } = await import("../src/theme.js");
+    const t = buildTheme("no-color");
+    const result = renderUserCard("hello world", t);
+    expect(result).toContain("▸");
+    expect(result).toContain("hello world");
+  });
+
+  it("renders assistant card with timing", async () => {
+    const { renderAssistantCard } = await import("../src/transcript.js");
+    const { buildTheme } = await import("../src/theme.js");
+    const t = buildTheme("no-color");
+    const result = renderAssistantCard("reply text", 3200, "Cooked", t);
+    expect(result).toContain("●");
+    expect(result).toContain("reply text");
+    expect(result).toContain("Cooked for 3s");
+  });
+
+  it("renders collapsed tool card", async () => {
+    const { renderToolCard } = await import("../src/transcript.js");
+    const { buildTheme } = await import("../src/theme.js");
+    const t = buildTheme("no-color");
+    const result = renderToolCard({ name: "read_file", target: "src/foo.ts", success: true, durationMs: 120, lineCount: 42 }, t);
+    expect(result).toContain("⚙");
+    expect(result).toContain("read_file");
+    expect(result).toContain("✓");
+    expect(result).toContain("42");
+  });
+
+  it("renders error card", async () => {
+    const { renderErrorCard } = await import("../src/transcript.js");
+    const { buildTheme } = await import("../src/theme.js");
+    const t = buildTheme("no-color");
+    const result = renderErrorCard("connection refused", t);
+    expect(result).toContain("✗");
+    expect(result).toContain("connection refused");
+  });
+
+  it("renders system notice", async () => {
+    const { renderSystemNotice } = await import("../src/transcript.js");
+    const { buildTheme } = await import("../src/theme.js");
+    const t = buildTheme("no-color");
+    const result = renderSystemNotice("Compaction: 42 msgs → 8 msgs", t);
+    expect(result).toContain("ℹ");
+  });
+});
