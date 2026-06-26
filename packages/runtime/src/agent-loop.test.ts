@@ -71,8 +71,8 @@ describe("AgentLoop", () => {
     await journal.close();
 
     const lines = (await readFile(journalPath, "utf-8")).trim().split("\n");
-    // run:start, turn:start, tool:call, tool:result, turn:start, run:end
-    expect(lines.length).toBe(6);
+    // run:start, turn:start, assistant:text, tool:call, tool:result, turn:start, run:end
+    expect(lines.length).toBe(7);
     await rm(dir, { recursive: true, force: true });
   });
 
@@ -98,7 +98,8 @@ describe("AgentLoop", () => {
     await journal.close();
 
     const lines = (await readFile(journalPath, "utf-8")).trim().split("\n");
-    const toolResultLine = JSON.parse(lines[3]);
+    // run:start, turn:start, assistant:text, tool:call, tool:result, ...
+    const toolResultLine = JSON.parse(lines[4]);
     expect(toolResultLine.type).toBe("tool:result");
     expect(toolResultLine.output).toContain("unknown tool");
     await rm(dir, { recursive: true, force: true });

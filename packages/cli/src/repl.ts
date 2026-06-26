@@ -76,14 +76,6 @@ const SPIN_VERBS = [
   "Razzmatazzing", "Conjuring", "Percolating", "Marinating",
   "Noodling", "Tinkering", "Finagling", "Cogitating",
 ];
-const SPIN_TIPS = [
-  "Press Ctrl-C to interrupt the current turn",
-  "Type /help for the full command list",
-  "/clear wipes the conversation and starts fresh",
-  "/mode switches the permission strategy on the fly",
-  "Every turn is journaled — replay it from /tmp later",
-  "/stats shows messages, turns, and the journal path",
-];
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -133,25 +125,58 @@ function helmVersion(): string {
 
 const MASCOT = ["  ▐▛▀▜▌  ", "  ▐▌◣◢▐▌ ", "  ▝▜▄▟▘  "];
 
+const NARROW_BOX = 52;
+
 function renderWelcomeBox(opts: { title: string; greeting: string; cwd: string; tips: string[] }): string {
-  const width = Math.max(8, Math.min(termCols() - 1, 78));
+  const width = Math.max(8, termCols() - 1); // fill terminal width — no 78-char cap
   const inner = width - 2;
-  const leftW = 22; const gapW = 3; const rightW = inner - leftW - gapW;
-  const left: string[] = ["", ...MASCOT.map((m) => theme.accent(padVis(m, 9))), "", `   ${theme.bold(opts.greeting)}`, ""];
-  const right: string[] = [`${theme.bold(theme.accent("Session"))}`, ...opts.tips];
-  const rows = Math.max(left.length, right.length);
-  const lines: string[] = [];
   const titleSeg = `─ ${theme.bold(opts.title)}${theme.border(" ")}`;
-  const dashes = inner - visLen(titleSeg);
-  lines.push(theme.border("╭") + titleSeg + theme.border("─".repeat(Math.max(0, dashes)) + "╮"));
-  for (let r = 0; r < rows; r++) {
-    const l = padVis(truncVis(left[r] ?? "", leftW), leftW);
-    const sep = theme.dim("│");
-    const rt = padVis(truncVis(right[r] ?? "", rightW), rightW);
-    lines.push(theme.border("│") + " " + l + " " + sep + " " + rt + theme.border("│"));
+  const dashes = Math.max(0, inner - visLen(titleSeg));
+  const lines: string[] = [];
+  lines.push(theme.border("╭") + titleSeg + theme.border("─".repeat(dashes) + "╮"));
+
+  const bRow = (content: string) => theme.border("│") + content + theme.border("│");
+
+  if (width >= NARROW_BOX) {
+    // Two-column layout.
+    // Row = "│" + " " + l(leftW) + " " + "│" + " " + rt(rightW) + "│"
+    //     = 1+1+leftW+1+1+1+rightW+1 = leftW+rightW+6 = width  →  rightW = width-leftW-6
+    const leftW = 22;
+    const rightW = Math.max(1, width - leftW - 6);
+    const left: string[] = ["", ...MASCOT.map((m) => theme.accent(padVis(m, 9))), "", `   ${theme.bold(opts.greeting)}`, ""];
+    const right: string[] = [`${theme.bold(theme.accent("Session"))}`, ...opts.tips];
+    const rows = Math.max(left.length, right.length);
+    for (let r = 0; r < rows; r++) {
+      const l = padVis(truncVis(left[r] ?? "", leftW), leftW);
+      const sep = theme.dim("│");
+      const rt = padVis(truncVis(right[r] ?? "", rightW), rightW);
+      lines.push(bRow(" " + l + " " + sep + " " + rt));
+    }
+  } else {
+    // Single-column layout for narrow terminals.
+    const center = (s: string) => {
+      const vis = visLen(s);
+      const lp = Math.max(0, Math.floor((inner - vis) / 2));
+      return " ".repeat(lp) + s + " ".repeat(Math.max(0, inner - vis - lp));
+    };
+    const leftAlign = (s: string) => {
+      const t = truncVis(s, inner - 2);
+      return " " + t + " ".repeat(Math.max(0, inner - 1 - visLen(t)));
+    };
+    lines.push(bRow(" ".repeat(inner)));
+    for (const m of MASCOT) lines.push(bRow(center(theme.accent(m.trim()))));
+    lines.push(bRow(" ".repeat(inner)));
+    lines.push(bRow(center(theme.bold(opts.greeting))));
+    lines.push(bRow(" ".repeat(inner)));
+    for (const tip of opts.tips) {
+      lines.push(bRow(tip ? leftAlign(tip) : " ".repeat(inner)));
+    }
+    lines.push(bRow(" ".repeat(inner)));
   }
+
   lines.push(theme.border("╰" + "─".repeat(inner) + "╯"));
-  lines.push(""); lines.push(theme.dim(opts.cwd));
+  lines.push("");
+  lines.push(theme.dim(truncVis(opts.cwd, width - 1)));
   return lines.join("\n");
 }
 
@@ -161,34 +186,42 @@ class Spinner {
   private timer: ReturnType<typeof setInterval> | null = null;
   private frame = 0;
   private drawn = false;
-  constructor(private readonly verb: string, private readonly tip: string) {}
+  private startMs = 0;
+  constructor(private readonly verb: string) {}
 
   start(): void {
     if (!process.stdout.isTTY) return;
+    this.startMs = Date.now();
     this.render();
     this.timer = setInterval(() => { this.frame = (this.frame + 1) % SPIN_FRAMES.length; this.redraw(); }, 120);
     this.timer.unref?.();
   }
 
+  private elapsed(): string {
+    const s = Math.floor((Date.now() - this.startMs) / 1000);
+    return s > 0 ? `${s}s` : "";
+  }
+
   private render(): void {
-    process.stdout.write(theme.accent(SPIN_FRAMES[this.frame]!) + " " + theme.dim(this.verb + "…") + "\n");
-    process.stdout.write(theme.dim("  └ Tip: " + this.tip) + "\n");
+    const elapsed = this.elapsed();
+    const suffix = elapsed ? theme.dim(` (${elapsed})`) : "";
+    process.stdout.write(theme.accent("· " + this.verb + "…") + suffix + "\n");
     this.drawn = true;
   }
 
   private redraw(): void {
     if (!this.drawn) return;
-    process.stdout.write("\x1b[2A\x1b[0J");
+    process.stdout.write("\x1b[1A\x1b[0J");
     this.render();
   }
 
   stop(): void {
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
-    if (this.drawn && process.stdout.isTTY) { process.stdout.write("\x1b[2A\x1b[0J"); this.drawn = false; }
+    if (this.drawn && process.stdout.isTTY) { process.stdout.write("\x1b[1A\x1b[0J"); this.drawn = false; }
   }
 
   printAbove(line: string): void {
-    if (this.drawn && process.stdout.isTTY) { process.stdout.write("\x1b[2A\x1b[0J"); console.log(line); this.render(); }
+    if (this.drawn && process.stdout.isTTY) { process.stdout.write("\x1b[1A\x1b[0J"); console.log(line); this.render(); }
     else console.log(line);
   }
 }
@@ -308,24 +341,84 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   statusState.mode = config.nonInteractive ?? "interactive";
 
   // ── Journal interceptor ───────────────────────────────────────────────
+  // Buffer pending call info so we can pair each call with its result and
+  // print a single completed line instead of two separate call/result lines.
+  const pendingCalls = new Map<string, { name: string; args: Record<string, unknown>; startMs: number }>();
+
   const originalAppend = journal.append.bind(journal);
   journal.append = async function(event) {
     const e = event as Record<string, unknown>;
     switch (e.type) {
+      case "assistant:text": {
+        // Model reasoning text before tool calls — bright bullet, full text color.
+        const text = String(e.content ?? "").trim();
+        if (text) emit(theme.bold("● ") + text);
+        break;
+      }
       case "tool:call": {
         const toolName = String(e.toolName ?? "");
+        // Use runId+toolName as key; if multiple concurrent calls use same tool
+        // the last call wins (acceptable approximation for sequential tools).
+        const callKey = `${String(e.runId ?? "")}_${toolName}`;
+        pendingCalls.set(callKey, {
+          name: toolName,
+          args: (e.args as Record<string, unknown>) ?? {},
+          startMs: Date.now(),
+        });
         statusState.currentTool = toolName;
         paintStatusBar();
-        emit(renderToolCard({ name: toolName, success: true, durationMs: 0 }, theme));
         break;
       }
       case "tool:result": {
+        const toolName = String(e.toolName ?? "");
+        const callKey = `${String(e.runId ?? "")}_${toolName}`;
+        const pending = pendingCalls.get(callKey);
+        pendingCalls.delete(callKey);
+
         const raw = String(e.output ?? "");
-        const out = isBinary(Buffer.from(raw))
-          ? "[Binary output]"
-          : sanitize(collapseOutput(raw).text);
         const success = !raw.startsWith("Error:");
-        emit(renderToolCard({ name: String(e.toolName ?? ""), success, durationMs: 0, summary: out.slice(0, 80) }, theme));
+        const collapsed = isBinary(Buffer.from(raw)) ? "[Binary output]" : collapseOutput(raw).text;
+        const cleaned = sanitize(collapsed);
+
+        // Try to extract a human-readable summary from the JSON output.
+        // Tool results are usually JSON objects; pick the most meaningful field.
+        let summary: string;
+        try {
+          const parsed = JSON.parse(cleaned) as Record<string, unknown>;
+          if (typeof parsed.replaced === "boolean") {
+            // edit result: show path
+            summary = String(parsed.path ?? "");
+          } else if (typeof parsed.bytesWritten === "number") {
+            // write result: show path + bytes
+            summary = `${parsed.path ?? ""} (${parsed.bytesWritten} bytes)`;
+          } else if (typeof parsed.content === "string") {
+            // read result: show first line of file content
+            const firstContent = parsed.content.split("\n")[0]?.trim() ?? "";
+            summary = firstContent.length > 80 ? firstContent.slice(0, 79) + "…" : firstContent;
+          } else if (Array.isArray(parsed.entries)) {
+            // ls result: show count
+            summary = `${(parsed.entries as unknown[]).length} entries`;
+          } else if (Array.isArray(parsed.matches)) {
+            // glob result: show count
+            summary = `${(parsed.matches as unknown[]).length} matches`;
+          } else {
+            const firstLine = cleaned.split("\n")[0]?.trim() ?? "";
+            summary = firstLine.length > 80 ? firstLine.slice(0, 79) + "…" : firstLine;
+          }
+        } catch {
+          // Not JSON — show first line as-is
+          const firstLine = cleaned.split("\n")[0]?.trim() ?? "";
+          summary = firstLine.length > 80 ? firstLine.slice(0, 79) + "…" : firstLine;
+        }
+
+        const durationMs = pending ? Date.now() - pending.startMs : 0;
+        emit(renderToolCard({
+          name: toolName,
+          args: pending?.args,
+          success,
+          durationMs,
+          summary: summary || undefined,
+        }, theme));
         statusState.currentTool = null;
         paintStatusBar();
         break;
@@ -384,15 +477,21 @@ export async function startRepl(config: ReplConfig): Promise<void> {
       const rlI = rl as unknown as { line: string; cursor: number; _refreshLine: () => void };
       rlI.line = placeholder; rlI.cursor = placeholder.length;
       if (isTTY) {
-        // The paste echoed `echoedRows` extra rows above the current (tail) row.
-        // Clear all paste overflow rows plus the original input row, then
-        // reprompt so a fresh status bar + frame appears at the clean position.
+        // Layout when paste ends (cursor on tail row):
+        //   [status bar]          ← row -(echoedRows+3) from cursor
+        //   [top rule]            ← row -(echoedRows+2)
+        //   [prompt + line1]      ← row -(echoedRows+1)
+        //   line2 .. lineN        ← echoedRows-1 rows
+        //   [tail]                ← cursor here (row 0)
+        //
+        // Move up (echoedRows+2) to land on the top rule row, then
+        // erase to end-of-screen. The status bar row above is left intact so
+        // we don't accidentally eat into transcript or welcome-box content.
+        // Then redraw only the frame (top rule + prompt + bottom rule) without
+        // re-printing the status bar a second time.
         frame.close();
-        // +1 for input row, +1 for top rule, +1 for status bar = +3
-        process.stdout.write(`\r\x1b[${echoedRows + 3}A\x1b[0J`);
-        // reprompt() calls rl.prompt() which resets rl.line to "".
-        // Re-set the placeholder after reprompt so _refreshLine shows it.
-        reprompt();
+        process.stdout.write(`\r\x1b[${echoedRows + 2}A\x1b[0J`);
+        frame.open(() => rl.prompt());
         rlI.line = placeholder; rlI.cursor = placeholder.length;
         rlI._refreshLine();
         frame.repaint();
@@ -461,23 +560,58 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   tips.push(`${theme.dim("Journal")}   ${tilde(journalPath)}`);
   tips.push("");
   tips.push(theme.italic(theme.dim("/help for commands")));
-  console.log();
-  console.log(renderWelcomeBox({ title: `Helm v${helmVersion()}`, greeting: "Welcome back!", cwd: tilde(process.cwd()), tips }));
-  console.log();  // blank line between welcome box and first status bar
+
+  const welcomeBoxOpts = { title: `Helm v${helmVersion()}`, greeting: "Welcome back!", cwd: tilde(process.cwd()), tips };
+
+  // Track how many lines the welcome block occupies so we can erase and
+  // redraw it when the terminal is resized before the first user turn.
+  let welcomeLineCount = 0;
+  let welcomeActive = true; // cleared on first submitted input
+
+  function printWelcome(): void {
+    const box = renderWelcomeBox(welcomeBoxOpts);
+    const lines = box.split("\n");
+    welcomeLineCount = lines.length + 2; // +1 leading blank line, +1 trailing blank line
+    process.stdout.write("\n" + box + "\n\n");
+  }
+
+  function redrawWelcome(): void {
+    if (!welcomeActive || !process.stdout.isTTY) return;
+    // Erase the welcome block + status bar + frame (frame=2 rules + 1 prompt row)
+    // by moving the cursor up welcomeLineCount+3 rows then clearing to end.
+    frame.close();
+    const eraseRows = welcomeLineCount + 3; // +status bar +top rule +prompt row
+    process.stdout.write(`\r\x1b[${eraseRows}A\x1b[0J`);
+    printWelcome();
+    reprompt();
+  }
+
+  printWelcome();
   reprompt();
+
+  // Listen for resize while the welcome box is still on-screen.
+  process.stdout.on("resize", redrawWelcome);
 
   // ── Slash command registry ────────────────────────────────────────────
   const COMMANDS = ["/exit", "/quit", "/q", "/clear", "/help", "/stats", "/mode", "/theme", "/compact", "/tools"];
 
+  let replClosing = false; // set on /exit to prevent reprompt after rl.close()
+
   const processInput = async (input: string): Promise<void> => {
+    if (replClosing) return;
     const trimmed = input.trim();
     historyLines.push(trimmed);
+    if (welcomeActive) {
+      welcomeActive = false;
+      process.stdout.removeListener("resize", redrawWelcome);
+    }
 
     if (trimmed.startsWith("/")) {
       const parts = trimmed.split(/\s+/);
       const cmd = parts[0]!.toLowerCase();
       switch (cmd) {
         case "/exit": case "/quit": case "/q":
+          replClosing = true;
           console.log(theme.bold("Goodbye.")); rl.close(); return;
 
         case "/clear":
@@ -565,8 +699,7 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     paintStatusBar();
 
     const verb = SPIN_VERBS[(turnCount - 1) % SPIN_VERBS.length]!;
-    const tip = SPIN_TIPS[(turnCount - 1) % SPIN_TIPS.length]!;
-    const spinner = new Spinner(verb, tip);
+    const spinner = new Spinner(verb);
     activeSpinner = spinner;
     spinner.start();
 
@@ -610,6 +743,8 @@ export async function startRepl(config: ReplConfig): Promise<void> {
 
     hr();
 
+    if (replClosing) return;
+
     const queued = sm.dequeue();
     if (queued) {
       reprompt();
@@ -621,6 +756,7 @@ export async function startRepl(config: ReplConfig): Promise<void> {
 
   // ── Readline events ───────────────────────────────────────────────────
   rl.on("line", (line) => {
+    if (replClosing) return;
     if (paste.pasting) { paste.pushInner(line); return; }
     frame.close();
 
@@ -635,7 +771,7 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     if (process.stdout.isTTY) process.stdout.write("\n");
     processInput(expanded).catch((err) => {
       console.error(`REPL error: ${(err as Error).message}`);
-      hr(); reprompt();
+      if (!replClosing) { hr(); reprompt(); }
     });
   });
 

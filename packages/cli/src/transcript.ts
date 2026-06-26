@@ -63,22 +63,38 @@ export function renderAssistantCard(content: string, durationMs: number, verb: s
 
 export interface ToolCardOptions {
   name: string;
-  target?: string;
+  args?: Record<string, unknown>;
   success: boolean;
   durationMs: number;
-  lineCount?: number;
   summary?: string;
 }
 
+/** Format tool args as a short parenthesized preview, like: read(src/app.ts) */
+function argsPreview(args: Record<string, unknown>): string {
+  // Prefer path-like keys first; push content/body to last (too verbose)
+  const PRIORITY = ["path", "filePath", "file", "pattern", "command", "query", "content"];
+  const entries = Object.entries(args);
+  if (entries.length === 0) return "";
+  const primary = PRIORITY.find((k) => k in args) ?? entries[0]![0];
+  const val = String(args[primary] ?? "");
+  // Truncate at 60 chars; replace newlines
+  const display = val.replace(/\n.*/s, "…").slice(0, 60);
+  return `(${display})`;
+}
+
+/**
+ * Render a completed tool call as a single line:
+ *   ⚙ toolName(args)   ✓  [42ms]
+ *   └ result summary
+ */
 export function renderToolCard(opts: ToolCardOptions, theme: Theme): string {
-  const { name, target, success, durationMs, lineCount, summary } = opts;
+  const { name, args, success, durationMs, summary } = opts;
   const icon = success ? theme.success("✓") : theme.error("✗");
   const ms = durationMs < 1000 ? `${durationMs}ms` : `${(durationMs / 1000).toFixed(1)}s`;
-  const parts = [theme.tool(`⚙ ${name}`), target ?? "", icon];
-  if (lineCount !== undefined) parts.push(`${lineCount} lines`);
-  if (summary) parts.push(summary);
-  parts.push(theme.dim(`[${ms}]`));
-  return parts.filter(Boolean).join("  ");
+  const argStr = args ? argsPreview(args) : "";
+  const header = theme.tool("⚙ " + name) + theme.dim(argStr) + "   " + icon + "  " + theme.dim(`[${ms}]`);
+  if (!summary) return header;
+  return header + "\n" + theme.dim("  └ " + summary);
 }
 
 export function renderToolResultCollapsed(lines: number, theme: Theme): string {

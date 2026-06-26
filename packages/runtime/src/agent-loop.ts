@@ -351,6 +351,17 @@ export class AgentLoop {
           res.toolCalls &&
           res.toolCalls.length > 0
         ) {
+          // Emit any text the model produced before its tool calls.
+          if (typeof res.content === "string" && res.content.trim()) {
+            await this.journal.append({
+              type: "assistant:text",
+              runId,
+              turnIndex,
+              content: res.content.trim(),
+              timestamp: Date.now(),
+            });
+          }
+
           let breakOuter = false;
           for (const tc of res.toolCalls) {
             if (isAborted()) {

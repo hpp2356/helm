@@ -92,13 +92,14 @@ describe("E2E Demo", () => {
     // Assert the structure is correct
     expect(events[0].type).toBe("run:start");
     expect(events[1].type).toBe("turn:start");
-    expect(events[2].type).toBe("tool:call");
-    expect(events[2].toolName).toBe("calculator");
-    expect(events[3].type).toBe("tool:result");
-    expect(events[3].output).toContain("14");
-    expect(events[4].type).toBe("turn:start");   // turn 1 (final answer, no tools)
+    expect(events[2].type).toBe("assistant:text"); // reasoning text before tool calls
+    expect(events[3].type).toBe("tool:call");
+    expect(events[3].toolName).toBe("calculator");
+    expect(events[4].type).toBe("tool:result");
+    expect(events[4].output).toContain("14");
+    expect(events[5].type).toBe("turn:start");   // turn 1 (final answer, no tools)
     expect(events[events.length - 1].type).toBe("run:end");
-    expect(events.length).toBe(6); // run:start, turn0:start, tool:call, tool:result, turn1:start, run:end
+    expect(events.length).toBe(7); // run:start, turn0:start, assistant:text, tool:call, tool:result, turn1:start, run:end
 
     await rm(dir, { recursive: true, force: true });
   });

@@ -214,11 +214,12 @@ describe("transcript cards", () => {
     const { renderToolCard } = await import("../src/transcript.js");
     const { buildTheme } = await import("../src/theme.js");
     const t = buildTheme("no-color");
-    const result = renderToolCard({ name: "read_file", target: "src/foo.ts", success: true, durationMs: 120, lineCount: 42 }, t);
+    const result = renderToolCard({ name: "read_file", args: { path: "src/foo.ts" }, success: true, durationMs: 120, summary: "42 lines" }, t);
     expect(result).toContain("⚙");
     expect(result).toContain("read_file");
+    expect(result).toContain("src/foo.ts");
     expect(result).toContain("✓");
-    expect(result).toContain("42");
+    expect(result).toContain("42 lines");
   });
 
   it("renders error card", async () => {
