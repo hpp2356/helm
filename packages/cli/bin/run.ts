@@ -131,6 +131,7 @@ function parseReplArgs(
   tokenBudgetMax?: number;
   maxTurns: number;
   systemPrompt?: string | null;
+  mcpServers: Array<{ name: string; command: string }>;
 } {
   // Apply config file first, CLI flags override
   let providerKind: "scripted" | "deepseek" = base.provider ?? "scripted";
@@ -153,6 +154,7 @@ function parseReplArgs(
   let compactionKeepTurns = base.compactionKeepTurns ?? 2;
   let tokenBudgetMax: number | undefined = base.tokenBudget;
   let maxTurns = base.maxTurns ?? 20;
+  const mcpServers: Array<{ name: string; command: string }> = [];
 
   if (base.nonInteractive && isNonInteractiveStrategy(base.nonInteractive)) {
     nonInteractive = base.nonInteractive;
@@ -215,6 +217,14 @@ function parseReplArgs(
       const v = Number(arg.slice("--max-turns=".length));
       if (!Number.isInteger(v) || v < 1) process.exit(1);
       maxTurns = v;
+    } else if (arg.startsWith("--mcp-server=")) {
+      const val = arg.slice("--mcp-server=".length);
+      const eq = val.indexOf("=");
+      if (eq === -1) {
+        console.error(`Invalid --mcp-server: ${val}. Expected <name>=<command>`);
+        process.exit(1);
+      }
+      mcpServers.push({ name: val.slice(0, eq), command: val.slice(eq + 1) });
     }
   }
 
@@ -232,6 +242,7 @@ function parseReplArgs(
     tokenBudgetMax,
     maxTurns,
     systemPrompt,
+    mcpServers,
   };
 }
 
@@ -318,6 +329,7 @@ async function main() {
       tokenBudgetMax: parsed.tokenBudgetMax,
       maxTurns: parsed.maxTurns,
       systemPrompt: parsed.systemPrompt,
+      mcpServers: parsed.mcpServers,
     });
   }
 

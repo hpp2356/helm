@@ -19,6 +19,7 @@ import {
   type MessageRecord,
 } from "@helm/runtime";
 import { registerFileTools } from "@helm/runtime";
+import { McpRegistry } from "@helm/mcp";
 import type { Provider } from "@helm/core";
 import {
   PasteBuffer,
@@ -44,6 +45,11 @@ import { openExternalEditor } from "./editor.js";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
+export interface McpServerFlag {
+  name: string;
+  command: string;
+}
+
 export interface ReplConfig {
   provider: Provider;
   providerName: string;
@@ -58,6 +64,7 @@ export interface ReplConfig {
   maxTurns: number;
   systemPrompt?: string | null;
   configPath?: string;
+  mcpServers?: McpServerFlag[];
 }
 
 interface PermRule {
@@ -322,6 +329,30 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     registerFileTools(toolRuntime, workspaceRoot);
     for (const tool of toolRuntime.list()) {
       permissionRuntime.allow({ pattern: tool.name, riskLevel: tool.riskLevel ?? RiskLevel.LOW, description: `Built-in tool: ${tool.name}` });
+    }
+  }
+
+  // ── MCP Servers ───────────────────────────────────────────────────────
+  const mcpRegistry = new McpRegistry();
+  if (config.mcpServers && config.mcpServers.length > 0) {
+    const results = await mcpRegistry.connect(
+      config.mcpServers.map((s) => ({ name: s.name, command: s.command })),
+    );
+    for (const r of results) {
+      if (r.status === "failed") {
+        emit(renderSystemNotice(`MCP server "${r.serverName}" failed: ${r.error}`, theme));
+      } else {
+        emit(renderSystemNotice(`MCP server "${r.serverName}" connected`, theme));
+      }
+    }
+    // Register MCP tools into ToolRuntime.
+    for (const tool of mcpRegistry.tools()) {
+      toolRuntime.register(tool);
+      permissionRuntime.allow({
+        pattern: tool.name,
+        riskLevel: tool.riskLevel ?? RiskLevel.MEDIUM,
+        description: `MCP tool: ${tool.name}`,
+      });
     }
   }
 
