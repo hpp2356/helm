@@ -8,7 +8,7 @@ import {
   type PermissionPolicy,
   type NonInteractiveStrategy,
 } from "@helm/core";
-import type { Tool, Message } from "@helm/core";
+import type { Provider, Tool, Message } from "@helm/core";
 import {
   ScriptedProvider,
   AgentLoop,
@@ -72,8 +72,260 @@ function isNonInteractiveStrategy(
 
 const EXIT_PERMISSION_DENIED = 2;
 
+// ── Config file: ~/.helm/settings.json (like ~/.claude/settings.json) ──────
+
+interface HelmSettings {
+  provider?: "scripted" | "deepseek";
+  model?: string;
+  /** API key inline. */
+  apiKey?: string;
+  /** System prompt. null = no system message. Omit = auto-derived. */
+  systemPrompt?: string | null;
+  tools?: string;
+  perms?: string;
+  workspace?: string;
+  nonInteractive?: "auto-approve" | "auto-deny" | "risk-threshold";
+  riskThreshold?: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  compaction?: "summarize" | "truncate";
+  compactionKeepTurns?: number;
+  tokenBudget?: number;
+  maxTurns?: number;
+}
+
+function loadSettings(): HelmSettings {
+  const candidates = [
+    resolve(process.cwd(), ".helm", "settings.json"),
+    resolve(process.env.HOME ?? "/tmp", ".helm", "settings.json"),
+    // Backward-compat
+    resolve(process.cwd(), ".helmrc.json"),
+    resolve(process.env.HOME ?? "/tmp", ".helmrc.json"),
+  ];
+  for (const p of candidates) {
+    try {
+      if (existsSync(p)) {
+        return JSON.parse(readFileSync(p, "utf-8")) as HelmSettings;
+      }
+    } catch {
+      // Non-fatal
+    }
+  }
+  return {};
+}
+
+// ── REPL argument parsing ─────────────────────────────────────────────────
+
+function parseReplArgs(
+  args: string[],
+  base: HelmSettings = {},
+): {
+  providerKind: "scripted" | "deepseek";
+  model?: string;
+  apiKey?: string;
+  toolsPath?: string;
+  permsPath?: string;
+  workspaceRoot?: string;
+  nonInteractive?: NonInteractiveStrategy;
+  riskThreshold?: RiskLevel;
+  compaction?: CompactionStrategy;
+  compactionKeepTurns: number;
+  tokenBudgetMax?: number;
+  maxTurns: number;
+  systemPrompt?: string | null;
+} {
+  // Apply config file first, CLI flags override
+  let providerKind: "scripted" | "deepseek" = base.provider ?? "scripted";
+  let model: string | undefined = base.model;
+  let apiKey: string | undefined = base.apiKey;
+  let systemPrompt: string | null | undefined = base.systemPrompt;
+  let toolsPath: string | undefined = base.tools;
+  let permsPath: string | undefined = base.perms;
+  let workspaceRoot: string | undefined = base.workspace;
+
+  // --system-prompt flag override
+  for (const arg of args) {
+    if (arg.startsWith("--system-prompt=")) {
+      systemPrompt = arg.slice("--system-prompt=".length);
+    }
+  }
+  let nonInteractive: NonInteractiveStrategy | undefined;
+  let riskThreshold: RiskLevel | undefined;
+  let compaction: CompactionStrategy | undefined = base.compaction;
+  let compactionKeepTurns = base.compactionKeepTurns ?? 2;
+  let tokenBudgetMax: number | undefined = base.tokenBudget;
+  let maxTurns = base.maxTurns ?? 20;
+
+  if (base.nonInteractive && isNonInteractiveStrategy(base.nonInteractive)) {
+    nonInteractive = base.nonInteractive;
+  }
+  if (
+    base.riskThreshold &&
+    base.riskThreshold in RiskLevel
+  ) {
+    riskThreshold = RiskLevel[base.riskThreshold];
+  }
+
+  for (const arg of args) {
+    if (arg.startsWith("--provider=")) {
+      const p = arg.slice("--provider=".length);
+      if (p !== "scripted" && p !== "deepseek") {
+        console.error(`Invalid --provider: ${p}. Must be scripted or deepseek.`);
+        process.exit(1);
+      }
+      providerKind = p;
+    } else if (arg.startsWith("--model=")) {
+      model = arg.slice("--model=".length);
+    } else if (arg.startsWith("--api-key=")) {
+      apiKey = arg.slice("--api-key=".length);
+    } else if (arg.startsWith("--tools=")) {
+      toolsPath = arg.slice("--tools=".length);
+    } else if (arg.startsWith("--perms=")) {
+      permsPath = arg.slice("--perms=".length);
+    } else if (arg.startsWith("--workspace=")) {
+      workspaceRoot = arg.slice("--workspace=".length);
+    } else if (arg.startsWith("--non-interactive=")) {
+      const s = arg.slice("--non-interactive=".length);
+      if (!isNonInteractiveStrategy(s)) {
+        console.error(`Invalid --non-interactive: ${s}`);
+        process.exit(1);
+      }
+      nonInteractive = s;
+    } else if (arg.startsWith("--risk-threshold=")) {
+      const level = arg.slice("--risk-threshold=".length);
+      if (!(level in RiskLevel)) {
+        console.error(`Invalid --risk-threshold: ${level}`);
+        process.exit(1);
+      }
+      riskThreshold = RiskLevel[level as keyof typeof RiskLevel];
+    } else if (arg.startsWith("--compaction=")) {
+      const s = arg.slice("--compaction=".length);
+      if (s !== "summarize" && s !== "truncate") {
+        console.error(`Invalid --compaction: ${s}`);
+        process.exit(1);
+      }
+      compaction = s;
+    } else if (arg.startsWith("--compaction-keep-turns=")) {
+      const v = Number(arg.slice("--compaction-keep-turns=".length));
+      if (!Number.isInteger(v) || v < 1) process.exit(1);
+      compactionKeepTurns = v;
+    } else if (arg.startsWith("--token-budget=")) {
+      const v = Number(arg.slice("--token-budget=".length));
+      if (!Number.isFinite(v) || v <= 0) process.exit(1);
+      tokenBudgetMax = v;
+    } else if (arg.startsWith("--max-turns=")) {
+      const v = Number(arg.slice("--max-turns=".length));
+      if (!Number.isInteger(v) || v < 1) process.exit(1);
+      maxTurns = v;
+    }
+  }
+
+  return {
+    providerKind,
+    model,
+    apiKey,
+    toolsPath,
+    permsPath,
+    workspaceRoot,
+    nonInteractive,
+    riskThreshold,
+    compaction,
+    compactionKeepTurns,
+    tokenBudgetMax,
+    maxTurns,
+    systemPrompt,
+  };
+}
+
 async function main() {
   const rawArgs = process.argv.slice(2);
+
+  // Dispatch:
+  //   `helm` / `helm repl` / `helm --flags` → REPL
+  //   `helm run ...` / `helm tools.json ...` → batch
+  const isRepl =
+    rawArgs.length === 0 ||
+    rawArgs[0] === "repl" ||
+    rawArgs[0]?.startsWith("--");
+
+  if (isRepl) {
+    const replArgs = rawArgs[0] === "repl" ? rawArgs.slice(1) : rawArgs;
+    const { startRepl } = await import("../src/repl.js");
+    const config = loadSettings();
+
+    // Detect which config file was found
+    const cwdSettings = resolve(process.cwd(), ".helm", "settings.json");
+    const homeSettings = resolve(
+      process.env.HOME ?? "/tmp",
+      ".helm",
+      "settings.json",
+    );
+    const configPath =
+      Object.keys(config).length > 0
+        ? existsSync(cwdSettings)
+          ? cwdSettings
+          : existsSync(homeSettings)
+            ? homeSettings
+            : undefined
+        : undefined;
+
+    const parsed = parseReplArgs(replArgs, config);
+
+    // Build provider
+    let replProvider: Provider;
+    let providerName: string;
+    if (parsed.providerKind === "deepseek") {
+      const apiKey =
+        parsed.apiKey ?? process.env.DEEPSEEK_API_KEY;
+      if (!apiKey) {
+        console.error(
+          "DeepSeek provider requires DEEPSEEK_API_KEY env var or --api-key flag.",
+        );
+        process.exit(1);
+      }
+      try {
+        const mod = await import("@helm/provider-deepseek");
+        const OpenAIC = (mod as Record<string, unknown>)
+          .OpenAICompatibleProvider as new (opts: Record<string, unknown>) => Provider;
+        providerName = parsed.model ?? "deepseek-v4-flash";
+        // Note: no onText sink — the REPL buffers the full reply and renders
+        // Markdown (with a ● bullet) once the turn completes, Claude-style.
+        replProvider = new OpenAIC({
+          apiKey,
+          model: providerName,
+        });
+      } catch {
+        console.error(
+          "Failed to load @helm/provider-deepseek. Falling back to ScriptedProvider.",
+        );
+        providerName = "scripted (fallback)";
+        replProvider = new ScriptedProvider([]);
+      }
+    } else {
+      providerName = "scripted";
+      replProvider = new ScriptedProvider([]);
+    }
+
+    return startRepl({
+      provider: replProvider,
+      providerName,
+      configPath,
+      toolsPath: parsed.toolsPath,
+      permsPath: parsed.permsPath,
+      workspaceRoot: parsed.workspaceRoot,
+      nonInteractive: parsed.nonInteractive,
+      riskThreshold: parsed.riskThreshold,
+      compaction: parsed.compaction,
+      compactionKeepTurns: parsed.compactionKeepTurns,
+      tokenBudgetMax: parsed.tokenBudgetMax,
+      maxTurns: parsed.maxTurns,
+      systemPrompt: parsed.systemPrompt,
+    });
+  }
+
+  // `helm run ...` → batch mode
+  if (rawArgs[0] === "run") {
+    rawArgs.shift(); // consume "run" subcommand
+  }
+
   const positional: string[] = [];
   let timeoutMs: number | undefined;
   let turnDelayMs = 0;

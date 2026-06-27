@@ -14,5 +14,8 @@
   "dependencies": {
     "@helm/core": "workspace:*",
     "@helm/runtime": "workspace:*"
+  },
+  "optionalDependencies": {
+    "@helm/provider-deepseek": "workspace:*"
   }
 }

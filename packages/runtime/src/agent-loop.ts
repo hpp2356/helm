@@ -52,6 +52,16 @@ export interface AgentLoopResult {
   cancelled?: { reason: "external" | "timeout" };
   /** True if any permission was denied during the run. */
   permissionDenied: boolean;
+  /** Final message list from the run (for multi-turn continuation). */
+  messages: MessageRecord[];
+}
+
+/** Serializable message shape used in AgentLoopResult. */
+export interface MessageRecord {
+  role: string;
+  content: string;
+  toolCalls?: unknown;
+  toolCallId?: string;
 }
 
 const EXIT_OK = 0;
@@ -67,13 +77,14 @@ export class AgentLoop {
     private options: AgentLoopOptions = { maxTurns: 10 },
   ) {}
 
-  async run(runId: string, userMessage: string): Promise<AgentLoopResult> {
-    const messages: Array<{
-      role: string;
-      content: string;
-      toolCalls?: unknown;
-      toolCallId?: string;
-    }> = [{ role: "user", content: userMessage }];
+  async run(
+    runId: string,
+    userMessage: string,
+    continueFrom?: MessageRecord[],
+  ): Promise<AgentLoopResult> {
+    const messages: MessageRecord[] = continueFrom
+      ? [...continueFrom, { role: "user", content: userMessage }]
+      : [{ role: "user", content: userMessage }];
 
     // Combine external signal + timeout into a single internal controller.
     const controller = new AbortController();
@@ -147,6 +158,7 @@ export class AgentLoop {
         exitCode: EXIT_CANCELLED,
         cancelled: { reason: cancelReason ?? "external" },
         permissionDenied: false,
+        messages: [...messages],
       };
     }
 
@@ -339,6 +351,17 @@ export class AgentLoop {
           res.toolCalls &&
           res.toolCalls.length > 0
         ) {
+          // Emit any text the model produced before its tool calls.
+          if (typeof res.content === "string" && res.content.trim()) {
+            await this.journal.append({
+              type: "assistant:text",
+              runId,
+              turnIndex,
+              content: res.content.trim(),
+              timestamp: Date.now(),
+            });
+          }
+
           let breakOuter = false;
           for (const tc of res.toolCalls) {
             if (isAborted()) {
@@ -463,7 +486,7 @@ export class AgentLoop {
     });
 
     return cancelled
-      ? { exitCode, cancelled, permissionDenied }
-      : { exitCode, permissionDenied };
+      ? { exitCode, cancelled, permissionDenied, messages: [...messages] }
+      : { exitCode, permissionDenied, messages: [...messages] };
   }
 }

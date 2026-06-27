@@ -16,6 +16,11 @@ export interface OpenAICompatibleProviderOptions {
   maxTokens?: number;
   /** Sampling temperature. Default: 0.7. */
   temperature?: number;
+  /**
+   * Streaming text callback. When set, each text delta from the SSE
+   * stream is passed here before assembly.
+   */
+  onText?: (text: string) => void;
 }
 
 const DEFAULT_MODEL = "deepseek-v4-flash";
@@ -230,6 +235,7 @@ export class OpenAICompatibleProvider implements Provider {
   private model: string;
   private maxTokens: number;
   private temperature: number;
+  private onText?: (text: string) => void;
 
   /** Optional: tools to include in every request (set by AgentLoop). */
   private _tools?: HelmToolDef[];
@@ -242,6 +248,7 @@ export class OpenAICompatibleProvider implements Provider {
     this.model = options.model ?? DEFAULT_MODEL;
     this.maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
     this.temperature = options.temperature ?? DEFAULT_TEMPERATURE;
+    this.onText = options.onText;
   }
 
   /** Set tools from the Provider interface (called by AgentLoop). */
@@ -298,9 +305,10 @@ export class OpenAICompatibleProvider implements Provider {
         const delta = chunk.choices?.[0]?.delta;
         if (!delta) continue;
 
-        // Accumulate text
+        // Accumulate text + stream to caller
         if (delta.content) {
           acc.content += delta.content;
+          this.onText?.(delta.content);
         }
 
         // Accumulate tool calls (streamed incrementally by index)
