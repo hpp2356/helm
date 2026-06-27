@@ -33,126 +33,63 @@ packages/cli/
 pnpm-workspace.yaml             # +packages/mcp
 ```
 
-### Walkthrough 1: 连接一个 MCP server → 看 journal 里的 initialize 事件
-
-使用 SDK 内置的 InMemoryTransport 测试（无需外部进程）：
+### Walkthrough 1: 完整 MCP client 生命周期（InMemoryTransport，无需外部进程）
 
 ```bash
-pnpm -C packages/mcp test --reporter=verbose
+tsx demo/pr17-mcp-client.ts
 ```
 
 **输出：**
 
 ```
- ✓ src/client.test.ts > McpClient > connects and discovers tools via initialize handshake
- ✓ src/client.test.ts > McpClient > calls a tool and returns content blocks
- ...
- Test Files  2 passed (2)
-      Tests  14 passed (14)
+── 连接成功 ──
+server: demo
+available: true
+tools: add, echo
+
+── tools/list ──
+  add: Add two numbers
+  echo: Returns the input message
+
+── tools/call ──
+add(2, 3) → { content: [{ type: "text", text: "5" }], isError: false }
+echo("hello from MCP") → { content: [{ type: "text", text: "hello from MCP" }], isError: false }
+
+── Helm ToolRuntime ──
+registered: demo:add
+  description: [MCP:demo] Add two numbers
+ToolRuntime.execute('demo:add', {a:10, b:20}) → 30
+
+── 未知 tool ──
+callTool('nonexistent') → isError: true
+  message: Error: unknown tool: nonexistent
+
+── disconnect 后调用 ──
+callTool after disconnect → isError: true
+  message: Error: MCP server "demo" is unavailable
+
+── 完成 ──
+MCP client lifecycle: connect → list → call → degrade → disconnect ✓
 ```
 
 **看什么：**
 
-- `McpClient.connect()` → SDK 自动执行 initialize/initialized handshake
-- 连接成功后 `client.available === true`
-- `client.tools` 包含 server 暴露的工具列表
+1. **connect** — `McpClient.connectTransport()` → SDK 自动执行 initialize/initialized handshake
+2. **tools/list** — 连接成功后 `client.tools` 包含 server 暴露的所有工具
+3. **tools/call** — `client.callTool("add", {a:2, b:3})` 返回结构化 content blocks `[{type:"text", text:"5"}]`
+4. **Helm ToolRuntime** — `registry.tools()` 将 MCP tool 转为 Helm Tool，name 带 `demo:` 前缀；ToolRuntime.execute 走正常权限+执行链路
+5. **Graceful 降级** — 未知 tool → `isError: true`，不 throw；disconnect 后 → "unavailable"，不 crash
+6. **完整生命周期** — connect → list → call → degrade → disconnect
 
 ---
 
-### Walkthrough 2: Agent 调用 MCP tool → 看 tools/call 请求和结果
-
-运行同一个测试套件，看 `calls a tool` 测试的具体逻辑。打开源码确认调用流程：
+### Walkthrough 2: 单元测试（14 个测试，无需外部进程）
 
 ```bash
-grep -A 20 "calls a tool and returns content blocks" packages/mcp/src/client.test.ts
+pnpm -C packages/mcp test --reporter=verbose
 ```
 
-**源码关键行：**
-
-```typescript
-const result = await client.callTool("add", { a: 2, b: 3 });
-expect(result.isError).toBe(false);
-expect(result.content[0]!.type).toBe("text");
-expect((result.content[0] as { text: string }).text).toBe("5");
-```
-
-**看什么：**
-
-- `client.callTool("add", { a: 2, b: 3 })` → `{ content: [{ type: "text", text: "5" }], isError: false }`
-- MCP tool 的返回值是结构化 content blocks，`registry.tools()` 中的 execute 函数将其序列化为字符串
-
----
-
-### Walkthrough 3: 多个 MCP server → 各自 tools 列表（namespace 前缀）
-
-```bash
-grep -A 15 "aggregates tools from multiple servers" packages/mcp/src/client.test.ts
-```
-
-**源码关键行：**
-
-```typescript
-const tools = registry.tools();
-expect(tools).toHaveLength(2);
-const names = tools.map((t) => t.name);
-expect(names).toContain("math:add");
-expect(names).toContain("search:search");
-```
-
-**看什么：**
-
-- `registry.tools()` 返回 `["math:add", "search:search"]` — 每个 tool 名带 server 前缀
-- 两个 server 的 tools 独立注册，执行时调用对应 server 的原始 tool 名
-
----
-
-### Walkthrough 4: MCP server 崩溃 → graceful 降级，agent 不 crash
-
-```bash
-grep -B 2 -A 12 "returns error result when server is unavailable\|returns error when calling an unknown tool" packages/mcp/src/client.test.ts
-```
-
-**源码关键行：**
-
-```typescript
-// 未知 tool → isError
-const result = await client.callTool("nonexistent", {});
-expect(result.isError).toBe(true);
-expect(result.content[0]!.text).toContain("unknown tool");
-
-// disconnect 后 → unavailable
-await client.disconnect();
-const result = await client.callTool("ping", {});
-expect(result.isError).toBe(true);
-expect(result.content[0]!.text).toContain("unavailable");
-```
-
-**看什么：**
-
-- `callTool()` 调用未知 tool 时返回 `isError: true`，不 throw
-- `disconnect()` 后 `callTool()` 返回 "unavailable" 错误 text，不 throw
-- Agent 看到的是普通的 `Error:` 前缀 tool result，照常继续运行
-
----
-
-### Walkthrough 5: MCP tool 参数类型正确转换
-
-```bash
-grep -A 10 "handles tool that throws" packages/mcp/src/client.test.ts
-```
-
-**源码关键行：**
-
-```typescript
-const result = await client.callTool("explode", {});
-expect(result.isError).toBe(true);
-expect((result.content[0] as { text: string }).text).toContain("BOOM");
-```
-
-**看什么：**
-
-- MCP server 内的异常被转为 `{ isError: true, content: [{ text: "Error: BOOM" }] }`
-- `mcpToolToHelmTool` 转换 schema 时保留 JSON Schema 的 type/properties/required
+**看什么：** 7 个测试覆盖 McpClient + McpRegistry，全部通过
 
 ---
 

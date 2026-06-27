@@ -8,6 +8,9 @@ importers:
 
   .:
     devDependencies:
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.29.0
+        version: 1.29.0(zod@4.4.3)
       '@types/node':
         specifier: ^25.9.1
         version: 25.9.1

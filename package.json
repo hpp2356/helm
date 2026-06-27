@@ -12,9 +12,11 @@
     "demo:first-chat": "tsx demo/pr12-first-chat.ts",
     "demo:tool-use": "tsx demo/pr12-tool-use.ts",
     "demo:agent-loop": "tsx demo/pr12-agent-loop.ts",
-    "demo:error-mapping": "tsx demo/pr12-error-mapping.ts"
+    "demo:error-mapping": "tsx demo/pr12-error-mapping.ts",
+    "demo:mcp": "tsx demo/pr17-mcp-client.ts"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/node": "^25.9.1",
     "tsx": "^4.19.0",
     "typescript": "^6.0.3",
