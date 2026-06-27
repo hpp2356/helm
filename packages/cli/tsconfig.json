@@ -8,7 +8,8 @@
   },
   "references": [
     { "path": "../core" },
-    { "path": "../runtime" }
+    { "path": "../runtime" },
+    { "path": "../provider-deepseek" }
   ],
-  "include": ["bin/**/*.ts"]
+  "include": ["bin/**/*.ts", "src/**/*.ts"]
 }

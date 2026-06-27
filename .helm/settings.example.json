@@ -1,0 +1,9 @@
+{
+  "provider": "deepseek",
+  "model": "deepseek-v4-flash",
+  "apiKey": "sk-your-api-key-here",
+  "compaction": "truncate",
+  "compactionKeepTurns": 3,
+  "tokenBudget": 32000,
+  "maxTurns": 20
+}

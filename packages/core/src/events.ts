@@ -4,6 +4,14 @@ export type RunEvent =
   | { type: "turn:start"; runId: string; turnIndex: number; timestamp: number }
   | { type: "turn:end"; runId: string; turnIndex: number; timestamp: number }
   | {
+      type: "assistant:text";
+      runId: string;
+      turnIndex: number;
+      /** Intermediate text the model produced before issuing tool calls. */
+      content: string;
+      timestamp: number;
+    }
+  | {
       type: "tool:call";
       runId: string;
       turnIndex: number;
