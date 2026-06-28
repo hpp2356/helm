@@ -8,6 +8,7 @@ pnpm install && pnpm build
 pnpm test                        # 全部测试（含 MCP 25 + CLI 76）
 pnpm -C packages/mcp test        # 只看 MCP 测试
 pnpm repl                        # 启动 REPL（需要 DEEPSEEK_API_KEY）
+pnpm repl:mcp                    # 启动 REPL + MCP calc server
 ```
 
 ## pnpm repl 启动过程

@@ -6,16 +6,10 @@
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
     "build": "pnpm -r build",
-    "demo": "pnpm build && node packages/cli/dist/bin/run.js packages/cli/fixtures/tools.json packages/cli/fixtures/script.jsonl packages/cli/fixtures/perms.json",
-    "demo:deny": "pnpm build && node packages/cli/dist/bin/run.js packages/cli/fixtures/tools.json packages/cli/fixtures/script.jsonl packages/cli/fixtures/perms-deny-calc.json",
-    "demo:token-counter": "tsx demo/pr12-token-counter.ts",
-    "demo:first-chat": "tsx demo/pr12-first-chat.ts",
-    "demo:tool-use": "tsx demo/pr12-tool-use.ts",
-    "demo:agent-loop": "tsx demo/pr12-agent-loop.ts",
-    "demo:error-mapping": "tsx demo/pr12-error-mapping.ts",
-    "demo:mcp": "tsx demo/pr17-mcp-client.ts",
+    "run": "pnpm build && node packages/cli/dist/bin/run.js packages/cli/fixtures/tools.json packages/cli/fixtures/script.jsonl packages/cli/fixtures/perms.json",
+    "run:deny": "pnpm build && node packages/cli/dist/bin/run.js packages/cli/fixtures/tools.json packages/cli/fixtures/script.jsonl packages/cli/fixtures/perms-deny-calc.json",
     "repl": "node packages/cli/dist/bin/run.js repl --provider=deepseek",
-    "repl:mcp": "node packages/cli/dist/bin/run.js repl --provider=deepseek --mcp-server=calc=tsx demo/mcp-calc-server.ts"
+    "repl:mcp": "node packages/cli/dist/bin/run.js repl --provider=deepseek --mcp-server=calc=tsx packages/mcp/fixtures/calc-server.ts"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
