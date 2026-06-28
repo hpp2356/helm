@@ -13,7 +13,9 @@
     "demo:tool-use": "tsx demo/pr12-tool-use.ts",
     "demo:agent-loop": "tsx demo/pr12-agent-loop.ts",
     "demo:error-mapping": "tsx demo/pr12-error-mapping.ts",
-    "demo:mcp": "tsx demo/pr17-mcp-client.ts"
+    "demo:mcp": "tsx demo/pr17-mcp-client.ts",
+    "repl": "node packages/cli/dist/bin/run.js repl --provider=deepseek",
+    "repl:mcp": "node packages/cli/dist/bin/run.js repl --provider=deepseek --mcp-server=calc=tsx demo/mcp-calc-server.ts"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

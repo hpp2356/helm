@@ -362,6 +362,170 @@ node packages/cli/dist/bin/run.js repl --provider=deeepseek --mcp-server=mycalc=
 7. **权限走正常流程。** MCP tools 通过 PermissionRuntime.allow() 注册，不受特殊处理。
 8. **SSE + Streamable HTTP 双支持。** SSE 兼容现有 server，Streamable HTTP 为推荐方案（支持 batching、session 管理、断线重连）。
 
+---
+
+### Walkthrough 8: IDEA 调试完整 LLM 调用链路（REPL 交互式）
+
+**前置条件**：设置 `DEEPSEEK_API_KEY` 环境变量或 `~/.deepseek-api-key` 文件。
+
+**IDEA 配置**：
+
+```
+右上角下拉 → "Helm REPL"（无 MCP）或 "Helm REPL + MCP"（带 MCP tools）→ 🐛 Debug
+```
+
+**完整调用链路**：
+
+```
+你在 REPL 输入 "帮我算 2+3"
+          │
+          ▼
+  repl.ts: startRepl()
+  1. readline.on("line") 收到输入
+  2. 拼 messageHistory: [...history, {role:"user", ...}]
+  3. AgentLoop.run(runId, userInput, messageHistory)
+          │
+          ▼
+  agent-loop.ts                         🔴 断点 1: 第 268 行
+  4. toToolDefs(toolRuntime.list())  ← 收集所有工具（内置 + MCP）
+  5. provider.setTools(toolDefs)     ← 通知 provider
+  6. provider.send(messages, signal) ← 调用 LLM
+          │
+          ▼
+  openai-compatible-provider.ts         🔴 断点 2: 第 282 行
+  7. helmToOpenAIMessages(messages) ← 转 OpenAI 格式
+  8. helmToOpenAITools(this._tools)  ← 转 function calling 格式
+  9. client.chat.completions.create({
+       model, messages, tools, stream   ← 💡 看 openaiMessages + openaiTools
+     })
+          │
+          │  ──── HTTP ────→ DeepSeek API
+          │
+          ▼
+  10. 逐 chunk 读取 stream
+  11. 组装 tool_calls + content
+  12. return { role: "assistant", content, toolCalls }
+          │
+          ▼
+  agent-loop.ts (继续)
+  13. 检查 response.toolCalls
+  14. 有 toolCall → 拼 assistant message（含 tool_calls）
+  15. toolRuntime.execute(toolName, args)  ← 执行工具
+  16. 拼 tool result message
+  17. 回到步骤 5（第二轮 LLM 调用）
+          │
+          │ 第二轮 messages 内容：
+          │ [system, user, assistant(toolCalls: add(2,3)), tool(result: 5)]
+          │
+          ▼
+  18. LLM 返回最终文本回复
+  19. 拼 assistant message → 回到 repl.ts
+          │
+          ▼
+  repl.ts
+  20. renderAssistantCard(finalContent)  ← 渲染到终端
+```
+
+**断点位置**：
+
+| 文件 | 行号 | 看什么 |
+|------|------|--------|
+| `packages/runtime/src/agent-loop.ts` | **268** | `messages`（Helm 格式）、`this.toolRuntime.list()` |
+| `packages/provider-deepseek/src/openai-compatible-provider.ts` | **282** | `openaiMessages`（最终 prompt）、`openaiTools`（最终工具列表） |
+
+**Debug 步骤**：
+
+```bash
+# 1. 启动（IDEA 里点 Debug）
+# 2. Console 出现 Helm REPL 界面
+# 3. 输入：帮我算 2+3
+# 4. 断点 268 命中 → Variables 看 messages
+# 5. F9 Resume → 断点 282 命中 → Alt+F8 输入 JSON.stringify(openaiMessages, null, 2)
+# 6. F9 Resume → 第二轮断点 268 命中 → messages 里多了 tool call
+# 7. F9 Resume → 第二轮断点 282 命中 → messages 含完整 tool 交互历史
+# 8. F9 Resume → REPL 显示回复
+```
+
+**第二轮 LLM 调用时 messages 的内容**：
+
+```json
+[
+  { "role": "system", "content": "You are Helm, an AI assistant..." },
+  { "role": "user", "content": "帮我算 2+3" },
+  {
+    "role": "assistant",
+    "content": null,
+    "toolCalls": [
+      { "id": "call_abc", "name": "calc:add", "args": { "a": 2, "b": 3 } }
+    ]
+  },
+  {
+    "role": "tool",
+    "content": "5",
+    "toolCallId": "call_abc"
+  }
+]
+```
+
+**IDEA vs Java 调试对比**：
+
+| | Java Spring Boot | Helm REPL |
+|---|---|---|
+| 启动 | `Application.main()` | IDEA Debug `Helm REPL` |
+| 交互 | curl / Postman | Console 里打字回车 |
+| 请求入口断点 | Controller 方法 | `agent-loop.ts:268` |
+| 看请求体 | `@RequestBody` body | `messages` 变量 |
+| 看出站请求 | `RestTemplate` 调用处 | `openai-compatible-provider.ts:282` |
+| 看出站请求体 | `HttpEntity` body | `openaiMessages` 变量 |
+| 表达式求值 | Alt+F8 → `new Gson().toJson(obj)` | Alt+F8 → `JSON.stringify(obj, null, 2)` |
+
+---
+
+### 测试期望
+
+**单元测试（无需 API Key，无需网络）**：
+
+| 测试分组 | 期望 |
+|---------|------|
+| McpClient (stdio) | connect → available=true, tools 包含 server 暴露的工具；callTool 返回结构化 content blocks；unknown tool → isError=true；disconnect 后 → unavailable |
+| McpRegistry | 多 server 工具聚合，名称带 namespace 前缀（`server:tool`）；空 registry → tools() 返回 `[]` |
+| HTTP transport dispatch | `connect()` 收到 `transport="sse"` → 创建 `SSEClientTransport`，传入正确 URL + headers；`transport="streamableHttp"` → 创建 `StreamableHTTPClientTransport`；`transport=undefined` → 走 stdio 不触发 HTTP mock |
+| HTTP graceful degradation | 连接失败 → `callTool` 返回 error result 而非 throw；`isError=true`，content 含 "unavailable" |
+
+**Demo 脚本输出期望**：
+
+```
+tsx demo/pr17-mcp-client.ts
+
+── 连接成功 ──
+server: demo
+available: true
+tools: add, echo
+
+── Helm ToolRuntime ──
+registered: demo:add
+registered: demo:echo
+ToolRuntime.execute('demo:add', {a:10, b:20}) → 30
+
+── disconnect 后调用 ──
+callTool after disconnect → isError: true
+  message: Error: MCP server "demo" is unavailable
+```
+
+**REPL 调试期望**：
+
+```
+pnpm repl
+# 或 IDEA Debug "Helm REPL"
+
+> 帮我算 2+3
+# → agent-loop.ts:268 断点命中，messages 含 system + user
+# → openai-compatible-provider.ts:282 断点命中，openaiMessages 含 system + user
+# → LLM 返回 tool_calls（或直接文本回复）
+# → 如果有 tool call，第二轮断点命中，messages 含完整交互历史
+# → REPL 显示最终回复
+```
+
 ### Java 类比
 
 | 概念 | Java 世界 |
@@ -376,3 +540,5 @@ node packages/cli/dist/bin/run.js repl --provider=deeepseek --mcp-server=mycalc=
 | StreamableHTTPClientTransport | `HttpClient` with streaming response (单一 endpoint) |
 | transport dispatch | Strategy pattern / Factory method |
 | @modelcontextprotocol/sdk | gRPC / RSocket 协议库 |
+| IDEA Debug REPL | IDEA Debug Spring Boot + curl |
+| Alt+F8 JSON.stringify | Alt+F8 new Gson().toJson() |
