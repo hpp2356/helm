@@ -130,7 +130,11 @@ function helmVersion(): string {
 
 // ── Welcome Box ────────────────────────────────────────────────────────────
 
-const MASCOT = ["  ▐▛▀▜▌  ", "  ▐▌◣◢▐▌ ", "  ▝▜▄▟▘  "];
+const MASCOT = [
+  "     ╱▛▀▀▀▀▀▜╲  ",
+  "   ══▟ ◉ ▼ ◉ ▙══",
+  "     ╲▙▁▁▁▁▁▟╱  ",
+];
 
 const NARROW_BOX = 52;
 
@@ -150,7 +154,7 @@ function renderWelcomeBox(opts: { title: string; greeting: string; cwd: string; 
     //     = 1+1+leftW+1+1+1+rightW+1 = leftW+rightW+6 = width  →  rightW = width-leftW-6
     const leftW = 22;
     const rightW = Math.max(1, width - leftW - 6);
-    const left: string[] = ["", ...MASCOT.map((m) => theme.accent(padVis(m, 9))), "", `   ${theme.bold(opts.greeting)}`, ""];
+    const left: string[] = ["", ...MASCOT.map((m) => theme.accent(padVis(m, 16))), "", `   ${theme.bold(opts.greeting)}`, ""];
     const right: string[] = [`${theme.bold(theme.accent("Session"))}`, ...opts.tips];
     const rows = Math.max(left.length, right.length);
     for (let r = 0; r < rows; r++) {
