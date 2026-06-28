@@ -1,6 +1,6 @@
 // packages/mcp/src/registry.ts
 import type { Tool } from "@helm/core";
-import type { McpServerConfig } from "./types.js";
+import type { AnyMcpServerConfig } from "./types.js";
 import { McpClient } from "./client.js";
 
 /**
@@ -25,7 +25,7 @@ export class McpRegistry {
    * Returns a result per server so the caller can report failures.
    */
   async connect(
-    configs: McpServerConfig[],
+    configs: AnyMcpServerConfig[],
   ): Promise<
     { serverName: string; status: "connected" | "failed"; error?: string }[]
   > {

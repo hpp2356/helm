@@ -1,8 +1,10 @@
 // packages/mcp/src/client.ts
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { McpServerConfig, McpToolDef, McpToolContent, McpToolResult } from "./types.js";
+import type { McpServerConfig, McpHttpServerConfig, McpToolDef, McpToolContent, McpToolResult } from "./types.js";
 import { McpError } from "./types.js";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -25,7 +27,7 @@ export class McpClient {
   readonly timeoutMs: number;
   private connectPromise: Promise<void> | null = null;
 
-  constructor(config: McpServerConfig) {
+  constructor(config: McpServerConfig | McpHttpServerConfig) {
     this.serverName = config.name;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
@@ -46,17 +48,56 @@ export class McpClient {
   }
 
   /**
-   * Spawn the server process, perform the initialize handshake, and
-   * discover available tools.
+   * Connect using config. Dispatches on `transport` field:
+   * - `undefined` | `"stdio"` → spawns a subprocess via stdio
+   * - `"sse"` → connects via SSE (deprecated, prefer streamableHttp)
+   * - `"streamableHttp"` → connects via Streamable HTTP (recommended)
    */
-  async connect(config: McpServerConfig): Promise<void> {
+  async connect(config: McpServerConfig | McpHttpServerConfig): Promise<void> {
+    if (config.transport === "sse" || config.transport === "streamableHttp") {
+      return this.connectHttp(config);
+    }
+    // stdio (default): config is McpServerConfig at this point
     if (this.connectPromise) return this.connectPromise;
 
+    const stdioConfig = config as McpServerConfig;
     const transport = new StdioClientTransport({
-      command: config.command,
-      args: config.args ?? [],
-      env: config.env as Record<string, string> | undefined,
+      command: stdioConfig.command,
+      args: stdioConfig.args ?? [],
+      env: stdioConfig.env as Record<string, string> | undefined,
     });
+
+    this.connectPromise = this._connect(transport);
+    try {
+      await this.connectPromise;
+    } finally {
+      this.connectPromise = null;
+    }
+  }
+
+  /**
+   * Connect to an MCP server over HTTP (SSE or Streamable HTTP).
+   *
+   * SSE (spec 2024-11-05):
+   *   Client → Server: HTTP POST to the endpoint URL
+   *   Server → Client: SSE event stream over GET
+   *
+   * Streamable HTTP (spec 2025-03-26+):
+   *   Both directions through a single HTTP endpoint.
+   *   Supports JSON-RPC batching, session management, and resumability.
+   */
+  async connectHttp(config: McpHttpServerConfig): Promise<void> {
+    if (this.connectPromise) return this.connectPromise;
+
+    const url = new URL(config.url);
+    const requestInit: RequestInit | undefined = config.headers
+      ? { headers: config.headers as Record<string, string> }
+      : undefined;
+
+    const transport =
+      config.transport === "sse"
+        ? new SSEClientTransport(url, { requestInit })
+        : new StreamableHTTPClientTransport(url, { requestInit });
 
     this.connectPromise = this._connect(transport);
     try {
