@@ -272,12 +272,12 @@ describe("McpRegistry", () => {
     const tools = registry.tools();
     expect(tools).toHaveLength(2);
     const names = tools.map((t) => t.name);
-    expect(names).toContain("math:add");
-    expect(names).toContain("search:search");
+    expect(names).toContain("math_add");
+    expect(names).toContain("search_search");
     expect(registry.connectedCount).toBe(2);
 
     // Execute through registry tools.
-    const addTool = tools.find((t) => t.name === "math:add")!;
+    const addTool = tools.find((t) => t.name === "math_add")!;
     expect(addTool.description).toContain("[MCP:math]");
     const addResult = await addTool.execute({});
     expect(addResult).toBe("7");

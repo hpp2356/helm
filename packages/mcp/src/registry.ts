@@ -84,7 +84,7 @@ export class McpRegistry {
       if (!client.available) continue;
       const serverRisk = this.riskLevels.get(serverName);
       for (const mcpTool of client.tools) {
-        const namespacedName = `${serverName}:${mcpTool.name}`;
+        const namespacedName = `${serverName}_${mcpTool.name}`;
         const originalName = mcpTool.name;
 
         // Build Helm-compatible parameters schema from MCP inputSchema.
