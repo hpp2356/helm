@@ -649,6 +649,18 @@ export async function startRepl(config: ReplConfig): Promise<void> {
       }
     }
 
+    // Show hint when user types "/" at start of line
+    if (key.name === "/" && !key.ctrl) {
+      const rlI = rl as unknown as { line: string };
+      if (rlI.line === "") {
+        // Will become "/" after this keypress — show hint after a tick
+        const names = COMMANDS.map((c) => c.slice(1)); // strip leading /
+        const hint = theme.dim(`skills: ${names.join(", ")}`);
+        // Use setImmediate so the "/" is rendered first
+        setImmediate(() => emit(hint));
+      }
+    }
+
     // Tab completion for slash commands
     if (key.name === "tab") {
       const rlI = rl as unknown as { line: string; cursor: number; _refreshLine: () => void };
