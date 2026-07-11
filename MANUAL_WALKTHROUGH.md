@@ -1,245 +1,214 @@
-# Helm 手动走查 (PR19)
+# Helm 手动走查 (PR20)
 
 ## 跑命令
 
 ```bash
 cd ~/projects-ai/helm/helm-dev
 pnpm install && pnpm build
-pnpm test                        # 全部测试（含 skill 31 + plugin 32 + runtime 196 + CLI 80）
-pnpm -C packages/skill test      # 只看 skill 测试
+pnpm test                        # 全部测试
+pnpm -C packages/core test       # 只看 streaming 测试
+pnpm -C packages/provider-deepseek test  # 只看 provider 测试
 pnpm repl                        # 启动 REPL（需要 DEEPSEEK_API_KEY）
 ```
 
-## 场景 1：/help 列出所有 skills
+## 场景 1：对话 → 看 streaming 逐 token 输出（text_delta）
 
 **命令**：
 
 ```bash
-pnpm repl
-> /help
+pnpm repl --provider=deepseek
+> Tell me a short joke
 ```
 
-**预期输出**：
+**预期行为**：
 
-```
-Skills (11):
-  /help  — List all available skills
-  /tools  — List all available tools
-  /clear  — Clear conversation history
-  /exit  — Exit REPL
-  /stats  — Show session statistics
-  /plugins  — List loaded plugins
-  /analyze  — Analyze current conversation   ← 如果有 user skill 文件
+- REPL 不再等全部完成再显示，而是**逐 token 流式输出**
+- 每收到一个 SSE `text_delta`，立即 `process.stdout.write(text)` 打到终端
+- turn 结束后显示统计行：`↳ N tokens, M tool calls, X.Xs`
 
-Ctrl-C interrupt  |  Ctrl-D exit  |  Ctrl-X Ctrl-E external editor
-```
+**对比**（streaming vs non-streaming）：
 
-## 场景 2：/tools 列出所有 tools（包括 MCP tools）
+| 模式 | 输出方式 | 用户感知 |
+|------|----------|----------|
+| Streaming（PR20） | 逐 token 实时打印 | 文字像打字一样出现 |
+| Non-streaming（PR19） | 缓冲到完成再整体显示 | 等待 → 突然全部出现 |
 
-**命令**：
+**journal 输出**：
 
 ```bash
-pnpm repl
-> /tools
+cat /tmp/helm-repl-*.jsonl | tail -5
 ```
-
-**预期输出**：
-
-```
-Tools (7):
-  • read
-  • write
-  • edit
-  • ls
-  • glob
-  • bash
-  • hello-plugin__say-hello    ← 如果有 plugin 提供的 tool
-```
-
-## 场景 3：创建自定义 skill 文件 → /my-skill 可用
-
-**步骤**：
-
-```bash
-# 1. 创建 skill 目录
-mkdir -p ~/.helm/skills
-
-# 2. 创建 skill 文件
-cat > ~/.helm/skills/analyze.js << 'EOF'
-export default {
-  name: "analyze",
-  description: "Analyze current conversation",
-  handler: async (input, ctx) => {
-    return `Conversation has ${ctx.messages.length} messages. Input: "${input}"`;
-  },
-};
-EOF
-
-# 3. 启动 REPL
-pnpm repl
-> /analyze hello world
-```
-
-**预期输出**：
-
-```
-Conversation has 1 messages. Input: "hello world"
-```
-
-## 场景 4：Skill 调用 tool → 看 journal 里 skill:call + tool:call 事件
-
-**步骤**：
-
-```bash
-# 创建一个调用 tool 的 skill
-cat > ~/.helm/skills/read-file.js << 'EOF'
-export default {
-  name: "read-file",
-  description: "Read a file using the read tool",
-  handler: async (input, ctx) => {
-    const readTool = ctx.tools.get("read");
-    if (!readTool) return "No read tool available";
-    const result = await readTool.execute({ path: input });
-    return result;
-  },
-};
-EOF
-
-pnpm repl
-> /read-file /tmp/test.txt
-```
-
-**查看 journal**：
-
-```bash
-cat /tmp/helm-repl-*.jsonl | grep -E "skill:call|tool:call"
-```
-
-**预期 journal 输出**：
 
 ```json
-{"type":"skill:call","runId":"repl-xxx","skillName":"read-file","input":"/tmp/test.txt","timestamp":1234567890}
-{"type":"tool:call","runId":"repl-xxx","turnIndex":0,"toolName":"read","args":{"path":"/tmp/test.txt"},"timestamp":1234567890}
+{"type":"assistant:text","runId":"repl-xxx-t1","turnIndex":1,"content":"Why did the scarecrow win an award? Because he was outstanding in his field!","timestamp":...}
 ```
 
-## 场景 5：Plugin 提供的 skill → 自动出现在 /help 里
+> 注意：journal 记录的是完整文本（不是逐 delta），streaming 事件不写入 journal。
 
-**步骤**：
-
-```bash
-# 确保有 plugin 提供了 skill（参考 PR18 walkthrough）
-# 在 plugin.json 里声明 skill，在 index.js 里实现 handler
-
-pnpm repl
-> /help
-```
-
-**预期**：plugin 声明的 skill（如 `/greet`）会出现在 `/help` 列表里。
-
-## 场景 6：/clear + /exit 从 PR16 迁移为 skills
+## 场景 2：Agent 调 tool → 看 tool_call_delta 事件
 
 **命令**：
 
 ```bash
-pnpm repl
-
-# /clear 清空对话历史
-> hello
-> /clear
-# 输出: Conversation history cleared. (1 messages removed)
-
-# /exit 退出 REPL
-> /exit
-# 输出: Goodbye.
+pnpm repl --provider=deepseek
+> Read the file package.json and tell me the version
 ```
 
-**注意**：`/quit` 和 `/q` 是 `/exit` 的别名，同样可用。
+**预期行为**：
 
-## pnpm repl 启动过程（含 Skill 加载）
+1. REPL 实时输出文本 delta（"Let me read..."）
+2. Provider 收到 `tool_calls` SSE chunk 时，emit `tool_call_delta` 事件
+3. Journal 拦截器显示 tool call 和 result（与 PR19 一致）
+4. turn 结束后显示统计：`↳ N tokens, 1 tool calls, X.Xs`
 
-**命令**：`node packages/cli/dist/bin/run.js repl --provider=deepseek`
+**journal 输出**：
 
-**入口**：`packages/cli/bin/run.ts → main()`
+```bash
+cat /tmp/helm-repl-*.jsonl | grep -E "tool:call|tool:result"
+```
 
-| 顺序 | 文件 | 做什么 |
-|------|------|--------|
-| 1 | `run.ts:286` `main()` | 解析 `process.argv`，发现是 `repl` 子命令 |
-| 2 | `run.ts:299` | `import("../src/repl.js")` 动态加载 REPL 模块 |
-| 3 | `run.ts:300` | `loadSettings()` 读 `.helm/settings.json` |
-| 4 | `run.ts:318` | `parseReplArgs()` 解析 `--provider`、`--mcp-server` 等 flag |
-| 5 | `run.ts:323-353` | 创建 Provider |
-| 6 | `run.ts:355` | 调 `startRepl(config)` → 进入 `packages/cli/src/repl.ts` |
+```json
+{"type":"tool:call","runId":"repl-xxx-t1","turnIndex":1,"toolName":"read","args":{"path":"package.json"},"timestamp":...}
+{"type":"tool:result","runId":"repl-xxx-t1","turnIndex":1,"toolName":"read","output":"...","timestamp":...}
+```
 
-**repl.ts `startRepl()` 初始化**：
+## 场景 3：/stats 查看 streaming 统计
 
-| 顺序 | 行号 | 做什么 |
-|------|------|--------|
-| 7 | `repl.ts:290-293` | 创建 `JsonlJournal` |
-| 8 | `repl.ts:299` | `new PermissionRuntime()` |
-| 9 | `repl.ts:316` | `new ToolRuntime(permissionRuntime)` |
-| 10 | `repl.ts:329` | `registerFileTools()` |
-| 11 | `repl.ts:336-357` | MCP server 连接 |
-| 12 | `repl.ts:373-386` | Plugin 加载 |
-| 13 | `repl.ts:393-435` | **`new SkillRegistry()` — 注册内置 skills、plugin skills、user skills** |
-| 14 | `repl.ts:567-577` | 构造 system prompt |
-| 15 | `repl.ts:582-630` | 渲染欢迎框 |
-| 16 | `repl.ts:632-650` | 创建 `AgentLoop` |
-| 17 | `repl.ts:743+` | 创建 `readline` 接口 → **等待输入** |
+**命令**：
 
-## Skill 执行流程
+```bash
+pnpm repl --provider=deepseek
+> Hello, how are you?
+> /stats
+```
+
+**预期输出**：
 
 ```
-用户输入 "/analyze hello"
+Session stats:
+  Messages: 3
+  Turns:    1
+  Provider: deepseek-v4-flash
+  Journal:  /tmp/helm-repl-xxx.jsonl
+
+Streaming stats:
+  Text tokens:      42
+  Tool call deltas: 0
+  Thinking tokens:  0
+```
+
+> `Text tokens` 是字符数代理（不是真正的 tokenizer），反映 streaming 接收的总字符数。
+
+## 场景 4：non-streaming provider 不受影响
+
+**命令**：
+
+```bash
+pnpm repl --provider=scripted
+> Hello
+```
+
+**预期行为**：
+
+- ScriptedProvider 没有 streaming，不 emit 任何 StreamingEvent
+- REPL 回退到 PR19 行为：缓冲完成后再显示 assistant card
+- `/stats` 不显示 "Streaming stats" 段落（因为 `streamingBus` 为空）
+
+## 场景 5：多轮对话 → stats 累积
+
+**命令**：
+
+```bash
+pnpm repl --provider=deepseek
+> What is 1+1?
+> What is 2+2?
+> /stats
+```
+
+**预期输出**：
+
+```
+Session stats:
+  Messages: 5
+  Turns:    2
+  Provider: deepseek-v4-flash
+  Journal:  /tmp/helm-repl-xxx.jsonl
+
+Streaming stats:
+  Text tokens:      85
+  Tool call deltas: 0
+  Thinking tokens:  0
+```
+
+> stats 跨 turn 累积，直到 REPL 退出或 `resetStats()` 被调用。
+
+## StreamingBus 执行流程
+
+```
+用户输入 "Hello"
   │
   ├─ repl.ts processInput()
-  │     ├─ trimmed.startsWith("/") → true
-  │     ├─ parseSkillInput("/analyze hello") → { name: "analyze", input: "hello" }
-  │     ├─ skillRegistry.execute("analyze", "hello", ctx)
-  │     │     ├─ emit skill:call event → journal
-  │     │     ├─ skill.handler("hello", ctx)
-  │     │     │     └─ 可以调用 ctx.tools.get("read").execute(...)
-  │     │     └─ return result text
-  │     └─ console.log(result)
-  │
-  └─ 终端显示结果
+  │     ├─ streamedTextThisTurn = false
+  │     ├─ streamingBus.emit({ type: "turn_start", turnIndex: 1 })
+  │     ├─ loop.run(runId, "Hello", messageHistory)
+  │     │     ├─ provider.send(messages, signal)
+  │     │     │     ├─ SSE chunk { delta: { content: "Hi" } }
+  │     │     │     │     ├─ onText("Hi")              ← PR16 callback（仍可用）
+  │     │     │     │     └─ bus.emit({ type: "text_delta", text: "Hi" })
+  │     │     │     │           └─ REPL subscriber: process.stdout.write("Hi")
+  │     │     │     │           └─ streamedTextThisTurn = true
+  │     │     │     ├─ SSE chunk { delta: { content: " there!" } }
+  │     │     │     │     └─ bus.emit({ type: "text_delta", text: " there!" })
+  │     │     │     └─ return { role: "assistant", content: "Hi there!" }
+  │     │     └─ return result
+  │     ├─ streamingBus.emit({ type: "turn_end", turnIndex: 1 })
+  │     ├─ streamedTextThisTurn === true
+  │     │     └─ 跳过 renderAssistantCard（不重复打印）
+  │     │     └─ 显示统计行: ↳ 8 tokens, 0 tool calls, 1.2s
+  │     └─ journal 拦截器: assistant:text → 跳过打印（streaming 已打印）
+  │           └─ 仍然调 originalAppend(event) 写入 journal
 ```
 
 ## IDEA 断点位置
 
 | 文件 | 行号 | 看什么 |
 |------|------|--------|
-| `packages/skill/src/registry.ts` | `execute()` 方法 | skill name、input、handler 返回值 |
+| `packages/core/src/streaming.ts` | `emit()` | 每个 StreamingEvent 的类型和内容 |
+| `packages/core/src/streaming.ts` | `updateStats()` | stats 累积逻辑 |
+| `packages/provider-deepseek/src/openai-compatible-provider.ts` | `this._streamingBus?.emit()` | SSE delta → StreamingEvent 转换 |
+| `packages/cli/src/repl.ts` | `streamingBus.on()` subscriber | REPL 实时输出逻辑 |
+| `packages/cli/src/repl.ts` | `streamedTextThisTurn` 检查 | 跳过重复打印的判断 |
 | `packages/runtime/src/agent-loop.ts` | **268** | `messages`、`this.toolRuntime.list()` |
-| `packages/provider-deepseek/src/openai-compatible-provider.ts` | **282** | 发给 LLM 的最终 JSON |
 
 ## 改动文件
 
 ```
-packages/skill/src/              (new)
-├── types.ts                     Skill, SkillContext, parseSkillInput, SkillError
-├── registry.ts                  SkillRegistry — 注册、查找、执行 skills
-├── builtins.ts                  createBuiltinSkills — /help, /tools, /clear, /exit, /stats, /plugins
-├── loader.ts                    loadUserSkills — 从 ~/.helm/skills/ 加载 .ts/.js 文件
-├── index.ts                     统一导出
-├── types.test.ts                parseSkillInput 测试
-├── registry.test.ts             SkillRegistry 测试
-├── builtins.test.ts             内置 skills 测试
-└── loader.test.ts               user skill 加载测试
+packages/core/src/
+├── streaming.ts              StreamingEvent 类型 + StreamingBus + StreamingStats
+├── streaming.test.ts         StreamingBus 测试（11 个）
+└── index.ts                  导出 streaming 类型
 
-packages/core/src/events.ts      新增 skill:call / skill:error 事件类型
-packages/plugin/src/loader.ts    新增 skipDefaultDirs 选项（修复测试隔离问题）
-packages/cli/src/repl.ts         集成 SkillRegistry，替换硬编码 switch
-packages/cli/package.json        新增 @helm/skill 依赖
-packages/cli/tsconfig.json       新增 skill 引用
+packages/provider-deepseek/src/
+└── openai-compatible-provider.ts   新增 streamingBus 选项 + emit 调用
+    openai-compatible-provider.test.ts  新增 6 个 streaming bus 测试
+
+packages/cli/src/
+└── repl.ts                   创建 bus、订阅、实时输出、跳过重复打印
+
+packages/cli/bin/
+└── run.ts                    创建 StreamingBus、传给 provider 和 REPL
+
+packages/skill/src/
+└── builtins.ts               /stats 显示 streaming 统计
 ```
 
 ## 关键设计决策
 
-1. **`@helm/skill` 独立包**，不污染 runtime
-2. **SkillRegistry** — 注册、查找、执行 skills，first wins 兼容
-3. **内置 skills** — `/help`, `/tools`, `/clear`, `/exit`, `/stats`, `/plugins` 从硬编码迁移到 skill 系统
-4. **Plugin skills** — 从 plugin module 的 `skills` 字段自动注册
-5. **User skill files** — `~/.helm/skills/*.ts|*.js`，ESM default export
-6. **SkillContext 隔离** — skill 通过 `ctx.tools` 调 tools，不能直接访问 AgentLoop
-7. **graceful error** — handler 抛异常 → emit skill:error，显示错误，不 crash
-8. **动态命令列表** — COMMANDS 数组从 skillRegistry.list() 动态构建，Tab 补全自动生效
+1. **StreamingBus 同步 emit** — handler 内联执行，REPL 无需 buffering
+2. **Provider 接口不变** — streaming 是 `OpenAICompatibleProvider` 的内部实现，通过 `streamingBus` 选项注入
+3. **REPL 创建 bus** — `run.ts` 创建 bus，传给 provider 和 `startRepl()`
+4. **不重复打印** — `streamedTextThisTurn` 标记避免 streaming + assistant card 双重输出
+5. **stats 累积** — StreamingBus 自己收集统计，`/stats` 读取显示
+6. **thinking_delta** — 支持 DeepSeek 的 `reasoning_content` 字段
+7. **turn_start/turn_end** — REPL 在 turn 生命周期边界 emit，未来可用于回放
+8. **向后兼容** — 不传 `streamingBus` 时行为与 PR19 完全一致

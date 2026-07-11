@@ -5,6 +5,7 @@ import {
   JsonlJournal,
   RiskLevel,
   TokenBudget,
+  StreamingBus,
   type PermissionPolicy,
   type NonInteractiveStrategy,
 } from "@helm/core";
@@ -317,6 +318,9 @@ async function main() {
 
     const parsed = parseReplArgs(replArgs, config);
 
+    // Create streaming bus (shared between provider and REPL)
+    const streamingBus = new StreamingBus();
+
     // Build provider
     let replProvider: Provider;
     let providerName: string;
@@ -334,11 +338,10 @@ async function main() {
         const OpenAIC = (mod as Record<string, unknown>)
           .OpenAICompatibleProvider as new (opts: Record<string, unknown>) => Provider;
         providerName = parsed.model ?? "deepseek-v4-flash";
-        // Note: no onText sink — the REPL buffers the full reply and renders
-        // Markdown (with a ● bullet) once the turn completes, Claude-style.
         replProvider = new OpenAIC({
           apiKey,
           model: providerName,
+          streamingBus,
         });
       } catch {
         console.error(
@@ -367,6 +370,7 @@ async function main() {
       maxTurns: parsed.maxTurns,
       systemPrompt: parsed.systemPrompt,
       mcpServers: parsed.mcpServers,
+      streamingBus,
     });
   }
 

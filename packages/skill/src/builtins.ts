@@ -1,6 +1,7 @@
 // packages/skill/src/builtins.ts
 import type { Skill } from "./types.js";
 import type { SkillRegistry } from "./registry.js";
+import type { StreamingBus } from "@helm/core";
 
 /** Dependencies injected into built-in skills. */
 export interface BuiltinDeps {
@@ -22,6 +23,8 @@ export interface BuiltinDeps {
   close: () => void;
   /** Skill registry (for /help to list skills). */
   registry: SkillRegistry;
+  /** Get the StreamingBus (if available). */
+  getStreamingBus?: () => StreamingBus | undefined;
 }
 
 /** Create built-in skills. */
@@ -90,13 +93,25 @@ function createStatsSkill(deps: BuiltinDeps): Skill {
     name: "stats",
     description: "Show session statistics",
     handler: async (_input, _ctx) => {
-      return [
+      const lines = [
         "Session stats:",
         `  Messages: ${deps.getMessageCount()}`,
         `  Turns:    ${deps.getTurnCount()}`,
         `  Provider: ${deps.providerName}`,
         `  Journal:  ${deps.journalPath}`,
-      ].join("\n");
+      ];
+
+      const bus = deps.getStreamingBus?.();
+      if (bus) {
+        const s = bus.stats;
+        lines.push("");
+        lines.push("Streaming stats:");
+        lines.push(`  Text tokens:      ${s.textTokens}`);
+        lines.push(`  Tool call deltas: ${s.toolCallDeltaCount}`);
+        lines.push(`  Thinking tokens:  ${s.thinkingTokens}`);
+      }
+
+      return lines.join("\n");
     },
   };
 }
