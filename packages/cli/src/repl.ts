@@ -20,6 +20,7 @@ import {
 } from "@helm/runtime";
 import { registerFileTools } from "@helm/runtime";
 import { McpRegistry } from "@helm/mcp";
+import { PluginLoader } from "@helm/plugin";
 import type { Provider } from "@helm/core";
 import {
   PasteBuffer,
@@ -369,6 +370,24 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     }
   }
 
+  // ── Plugins ───────────────────────────────────────────────────────────
+  const pluginLoader = new PluginLoader({ journal, runId });
+  const pluginResults = await pluginLoader.loadAll();
+  for (const r of pluginResults) {
+    if (r.status === "failed") {
+      emit(renderSystemNotice(`Plugin "${r.pluginName}" failed: ${r.error}`, theme));
+    }
+  }
+  // Register plugin tools into ToolRuntime.
+  for (const tool of pluginLoader.getTools()) {
+    toolRuntime.register(tool);
+    permissionRuntime.allow({
+      pattern: tool.name,
+      riskLevel: tool.riskLevel ?? RiskLevel.LOW,
+      description: `Plugin tool: ${tool.name}`,
+    });
+  }
+
   // ── Compaction ────────────────────────────────────────────────────────
   let tokenBudget: TokenBudget | undefined;
   let compaction: Compaction | undefined;
@@ -475,6 +494,12 @@ export async function startRepl(config: ReplConfig): Promise<void> {
         break;
       case "run:cancelled":
         emit(theme.dim(`⏹ Cancelled: ${e.reason}`));
+        break;
+      case "plugin:load":
+        emit(renderSystemNotice(`Plugin "${e.pluginName}" v${e.pluginVersion} loaded (${e.toolCount} tools)`, theme));
+        break;
+      case "plugin:error":
+        emit(renderSystemNotice(`Plugin "${e.pluginName}" error: ${e.message}`, theme));
         break;
     }
     await originalAppend(event);
@@ -603,6 +628,7 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     `${theme.dim("Provider")}  ${config.providerName}`,
     `${theme.dim("Tools")}     ${toolNames.length}`,
   ];
+  if (pluginLoader.count > 0) tips.push(`${theme.dim("Plugins")}   ${pluginLoader.count}`);
   if (config.configPath) tips.push(`${theme.dim("Config")}    ${tilde(config.configPath)}`);
   tips.push(`${theme.dim("Journal")}   ${tilde(journalPath)}`);
   tips.push("");
@@ -640,7 +666,7 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   process.stdout.on("resize", redrawWelcome);
 
   // ── Slash command registry ────────────────────────────────────────────
-  const COMMANDS = ["/exit", "/quit", "/q", "/clear", "/help", "/stats", "/mode", "/theme", "/compact", "/tools"];
+  const COMMANDS = ["/exit", "/quit", "/q", "/clear", "/help", "/stats", "/mode", "/theme", "/compact", "/tools", "/plugins"];
 
   let replClosing = false; // set on /exit to prevent reprompt after rl.close()
 
@@ -676,6 +702,7 @@ export async function startRepl(config: ReplConfig): Promise<void> {
             `  ${theme.bold("/theme dark")}       — 切换主题\n` +
             `  ${theme.bold("/compact")}          — 手动触发 compaction\n` +
             `  ${theme.bold("/tools")}            — 列出已注册工具\n` +
+            `  ${theme.bold("/plugins")}          — 列出已加载插件\n` +
             `  ${theme.bold("/help")}             — 显示此帮助\n\n` +
             `  Ctrl-C 中断 turn  │  Ctrl-D 退出  │  Ctrl-X Ctrl-E 外部编辑器`);
           hr(); reprompt(); return;
@@ -689,6 +716,17 @@ export async function startRepl(config: ReplConfig): Promise<void> {
         case "/tools": {
           const names = toolRuntime.getToolNames();
           console.log(`\n${theme.bold("Tools:")} ${names.length}\n` + names.map((n) => `  • ${n}`).join("\n"));
+          hr(); reprompt(); return;
+        }
+
+        case "/plugins": {
+          const plugins = pluginLoader.getLoadedPlugins();
+          if (plugins.length === 0) {
+            console.log(`\n${theme.bold("Plugins:")} none loaded`);
+          } else {
+            console.log(`\n${theme.bold("Plugins:")} ${plugins.length}\n` +
+              plugins.map((p) => `  • ${p.name} v${p.version} (${p.tools.length} tools)`).join("\n"));
+          }
           hr(); reprompt(); return;
         }
 
@@ -827,6 +865,7 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     try {
       writeFileSync(`${process.env.HOME ?? "/tmp"}/.helm_history`, historyLines.slice(-500).join("\n"), "utf-8");
     } catch { /* non-fatal */ }
+    pluginLoader.destroyAll().catch(() => {});
     journal.close().catch(() => {});
     console.log(theme.dim(`\nJournal → ${journalPath}`));
   });

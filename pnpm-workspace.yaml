@@ -6,6 +6,7 @@ packages:
   - 'packages/cli'
   - 'packages/provider-deepseek'
   - 'packages/mcp'
+  - 'packages/plugin'
 allowBuilds:
   esbuild: true
 minimumReleaseAgeExclude:

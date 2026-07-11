@@ -121,6 +121,21 @@ export type RunEvent =
       runId: string;
       serverName: string;
       timestamp: number;
+    }
+  | {
+      type: "plugin:load";
+      runId: string;
+      pluginName: string;
+      pluginVersion: string;
+      toolCount: number;
+      timestamp: number;
+    }
+  | {
+      type: "plugin:error";
+      runId: string;
+      pluginName: string;
+      message: string;
+      timestamp: number;
     };
 
 export function eventToString(event: RunEvent): string {

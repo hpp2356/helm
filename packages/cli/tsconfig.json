@@ -10,6 +10,7 @@
     { "path": "../core" },
     { "path": "../runtime" },
     { "path": "../mcp" },
+    { "path": "../plugin" },
     { "path": "../provider-deepseek" }
   ],
   "include": ["bin/**/*.ts", "src/**/*.ts"]
