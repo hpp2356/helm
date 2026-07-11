@@ -45,6 +45,8 @@ export class StaticConfigSource implements PluginConfigSource {
 export interface PluginLoaderOptions {
   /** Additional plugin directories to scan (beyond defaults). */
   pluginDirs?: string[];
+  /** If true, skip scanning default directories (~/.helm/plugins/, .helm/plugins/). */
+  skipDefaultDirs?: boolean;
   /** Config source for plugin config values. Defaults to EnvConfigSource. */
   configSource?: PluginConfigSource;
   /** Journal for emitting plugin events. */
@@ -79,9 +81,11 @@ export class PluginLoader {
 
     // Build directory list: project-level first (higher priority), then global
     this.pluginDirs = [];
-    const projDir = projectPluginDir();
-    if (existsSync(projDir)) this.pluginDirs.push(projDir);
-    if (existsSync(GLOBAL_PLUGIN_DIR)) this.pluginDirs.push(GLOBAL_PLUGIN_DIR);
+    if (!options.skipDefaultDirs) {
+      const projDir = projectPluginDir();
+      if (existsSync(projDir)) this.pluginDirs.push(projDir);
+      if (existsSync(GLOBAL_PLUGIN_DIR)) this.pluginDirs.push(GLOBAL_PLUGIN_DIR);
+    }
     if (options.pluginDirs) {
       for (const d of options.pluginDirs) {
         if (existsSync(d) && !this.pluginDirs.includes(d)) {

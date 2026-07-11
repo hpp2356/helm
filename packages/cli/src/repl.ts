@@ -21,7 +21,8 @@ import {
 import { registerFileTools } from "@helm/runtime";
 import { McpRegistry } from "@helm/mcp";
 import { PluginLoader } from "@helm/plugin";
-import type { Provider } from "@helm/core";
+import { SkillRegistry, createBuiltinSkills, loadUserSkills, parseSkillInput } from "@helm/skill";
+import type { Provider, Tool, Message } from "@helm/core";
 import {
   PasteBuffer,
   pastePlaceholder,
@@ -388,6 +389,56 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     });
   }
 
+  // ── Skills ────────────────────────────────────────────────────────────
+  const skillRegistry = new SkillRegistry({ journal, runId });
+
+  // Built-in skills (registered first — highest priority)
+  let replClosing = false;
+  const builtinSkills = createBuiltinSkills({
+    getToolNames: () => toolRuntime.getToolNames(),
+    getMessageCount: () => messageHistory.length,
+    getTurnCount: () => turnCount,
+    providerName: config.providerName,
+    journalPath,
+    getPlugins: () => pluginLoader.getLoadedPlugins().map((p) => ({
+      name: p.name, version: p.version, toolCount: p.tools.length,
+    })),
+    clearMessages: () => {
+      const count = messageHistory.length;
+      messageHistory = SYSTEM_MESSAGE ? [{ ...SYSTEM_MESSAGE }] : [];
+      turnCount = 0;
+      return count - (SYSTEM_MESSAGE ? 1 : 0);
+    },
+    close: () => { replClosing = true; },
+    registry: skillRegistry,
+  });
+  for (const skill of builtinSkills) skillRegistry.register(skill);
+
+  // Plugin skills (from plugin module implementations)
+  for (const plugin of pluginLoader.getLoadedPlugins()) {
+    if (plugin.module?.skills) {
+      for (const ps of plugin.module.skills) {
+        skillRegistry.register({
+          name: ps.name,
+          description: ps.description ?? `Plugin skill: ${ps.name}`,
+          handler: async (input: string) => {
+            return ps.handler({ input, config: {} });
+          },
+        });
+      }
+    }
+  }
+
+  // User skill files (~/.helm/skills/)
+  const userSkillEntries = await loadUserSkills();
+  for (const entry of userSkillEntries) {
+    if (entry.skill) {
+      skillRegistry.register(entry.skill);
+    } else if (entry.result.status === "failed") {
+      emit(renderSystemNotice(`Skill file "${entry.result.skillName}" failed: ${entry.result.error}`, theme));
+    }
+  }
+
   // ── Compaction ────────────────────────────────────────────────────────
   let tokenBudget: TokenBudget | undefined;
   let compaction: Compaction | undefined;
@@ -501,6 +552,12 @@ export async function startRepl(config: ReplConfig): Promise<void> {
       case "plugin:error":
         emit(renderSystemNotice(`Plugin "${e.pluginName}" error: ${e.message}`, theme));
         break;
+      case "skill:call":
+        // Skill calls are silent — the skill handler produces its own output
+        break;
+      case "skill:error":
+        emit(renderSystemNotice(`Skill "/${e.skillName}" error: ${e.message}`, theme));
+        break;
     }
     await originalAppend(event);
   };
@@ -520,8 +577,13 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   rl.setPrompt(theme.bold(theme.accent("› ")));
 
   const reprompt = (): void => {
-    printStatusBar();
-    frame.open(() => rl.prompt());
+    if (replClosing) return;
+    try {
+      printStatusBar();
+      frame.open(() => rl.prompt());
+    } catch {
+      // readline may have been closed between the guard and the call
+    }
   };
 
   // ── Ctrl+X Ctrl+E chord state ─────────────────────────────────────────
@@ -666,9 +728,22 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   process.stdout.on("resize", redrawWelcome);
 
   // ── Slash command registry ────────────────────────────────────────────
-  const COMMANDS = ["/exit", "/quit", "/q", "/clear", "/help", "/stats", "/mode", "/theme", "/compact", "/tools", "/plugins"];
+  // Build command list dynamically from registered skills + direct handlers
+  const DIRECT_COMMANDS = ["/mode", "/theme", "/compact"];
+  const COMMANDS = [...DIRECT_COMMANDS, ...skillRegistry.list().map((s: { name: string }) => `/${s.name}`), "/quit", "/q"];
 
-  let replClosing = false; // set on /exit to prevent reprompt after rl.close()
+  function makeSkillContext() {
+    const tools = new Map<string, Tool>();
+    for (const t of toolRuntime.list()) tools.set(t.name, t);
+    return {
+      tools,
+      messages: messageHistory as unknown as Message[],
+      addMessage: (msg: Message) => {
+        messageHistory.push(msg as MessageRecord);
+      },
+      runId,
+    };
+  }
 
   const processInput = async (input: string): Promise<void> => {
     if (replClosing) return;
@@ -682,53 +757,14 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     if (trimmed.startsWith("/")) {
       const parts = trimmed.split(/\s+/);
       const cmd = parts[0]!.toLowerCase();
+
+      // Direct handlers for commands that interact with REPL internal state
       switch (cmd) {
-        case "/exit": case "/quit": case "/q":
+        case "/quit": case "/q":
           replClosing = true;
-          console.log(theme.bold("Goodbye.")); rl.close(); return;
-
-        case "/clear":
-          messageHistory = SYSTEM_MESSAGE ? [{ ...SYSTEM_MESSAGE }] : [];
-          turnCount = 0;
-          console.log(theme.dim("Conversation history cleared."));
-          hr(); reprompt(); return;
-
-        case "/help":
-          console.log(`\n${theme.bold("Commands:")}\n` +
-            `  ${theme.bold("/exit, /quit, /q")}  — 退出\n` +
-            `  ${theme.bold("/clear")}            — 清空对话历史\n` +
-            `  ${theme.bold("/stats")}            — Session 统计\n` +
-            `  ${theme.bold("/mode <strategy>")} — 切换权限策略 (auto-approve|auto-deny|risk-threshold)\n` +
-            `  ${theme.bold("/theme dark")}       — 切换主题\n` +
-            `  ${theme.bold("/compact")}          — 手动触发 compaction\n` +
-            `  ${theme.bold("/tools")}            — 列出已注册工具\n` +
-            `  ${theme.bold("/plugins")}          — 列出已加载插件\n` +
-            `  ${theme.bold("/help")}             — 显示此帮助\n\n` +
-            `  Ctrl-C 中断 turn  │  Ctrl-D 退出  │  Ctrl-X Ctrl-E 外部编辑器`);
-          hr(); reprompt(); return;
-
-        case "/stats":
-          console.log(`\n${theme.bold("Session stats:")}\n` +
-            `  Messages: ${messageHistory.length}\n  Turns:    ${turnCount}\n` +
-            `  Provider: ${config.providerName}\n  Journal:  ${journalPath}`);
-          hr(); reprompt(); return;
-
-        case "/tools": {
-          const names = toolRuntime.getToolNames();
-          console.log(`\n${theme.bold("Tools:")} ${names.length}\n` + names.map((n) => `  • ${n}`).join("\n"));
-          hr(); reprompt(); return;
-        }
-
-        case "/plugins": {
-          const plugins = pluginLoader.getLoadedPlugins();
-          if (plugins.length === 0) {
-            console.log(`\n${theme.bold("Plugins:")} none loaded`);
-          } else {
-            console.log(`\n${theme.bold("Plugins:")} ${plugins.length}\n` +
-              plugins.map((p) => `  • ${p.name} v${p.version} (${p.tools.length} tools)`).join("\n"));
-          }
-          hr(); reprompt(); return;
-        }
+          console.log(theme.bold("Goodbye."));
+          rl.close();
+          return;
 
         case "/theme":
           console.log(theme.dim("Theme: dark (only option in this version)"));
@@ -752,11 +788,20 @@ export async function startRepl(config: ReplConfig): Promise<void> {
           }
           hr(); reprompt(); return;
         }
-
-        default:
-          console.log(`Unknown command: ${cmd}. Type /help for help.`);
-          hr(); reprompt(); return;
       }
+
+      // Skill dispatch — handles /help, /tools, /clear, /exit, /plugins, /stats, and user skills
+      const parsed = parseSkillInput(trimmed);
+      const skillInput = parsed.input;
+      const skillCtx = makeSkillContext();
+      const result = await skillRegistry.execute(parsed.name, skillInput, skillCtx);
+      if (result) console.log(result);
+      if (replClosing) {
+        console.log(theme.bold("Goodbye."));
+        rl.close();
+        return;
+      }
+      hr(); reprompt(); return;
     }
 
     // ── Agent turn ─────────────────────────────────────────────────────
@@ -847,6 +892,7 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     pastedBlocks.clear();
 
     if (!expanded.trim()) {
+      if (replClosing) return;
       if (process.stdout.isTTY) process.stdout.write("\x1b[2A\x1b[0J");
       reprompt(); return;
     }

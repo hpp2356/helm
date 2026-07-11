@@ -15,7 +15,8 @@
     "@helm/core": "workspace:*",
     "@helm/runtime": "workspace:*",
     "@helm/mcp": "workspace:*",
-    "@helm/plugin": "workspace:*"
+    "@helm/plugin": "workspace:*",
+    "@helm/skill": "workspace:*"
   },
   "optionalDependencies": {
     "@helm/provider-deepseek": "workspace:*"

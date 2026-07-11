@@ -11,6 +11,7 @@
     { "path": "../runtime" },
     { "path": "../mcp" },
     { "path": "../plugin" },
+    { "path": "../skill" },
     { "path": "../provider-deepseek" }
   ],
   "include": ["bin/**/*.ts", "src/**/*.ts"]

@@ -19,7 +19,7 @@ function cleanup(dir: string): void {
 
 describe("PluginLoader", () => {
   it("loads a valid plugin from directory", async () => {
-    const loader = new PluginLoader({ pluginDirs: [FIXTURES] });
+    const loader = new PluginLoader({ pluginDirs: [FIXTURES], skipDefaultDirs: true });
     const results = await loader.loadAll();
     const testResult = results.find((r) => r.pluginName === "test-plugin");
     expect(testResult).toBeDefined();
@@ -28,7 +28,7 @@ describe("PluginLoader", () => {
   });
 
   it("registers tools from loaded plugin", async () => {
-    const loader = new PluginLoader({ pluginDirs: [FIXTURES] });
+    const loader = new PluginLoader({ pluginDirs: [FIXTURES], skipDefaultDirs: true });
     await loader.loadAll();
     const tools = loader.getTools();
     const echoTool = tools.find((t) => t.name === "test-plugin__echo");
@@ -37,7 +37,7 @@ describe("PluginLoader", () => {
   });
 
   it("executes plugin tool", async () => {
-    const loader = new PluginLoader({ pluginDirs: [FIXTURES] });
+    const loader = new PluginLoader({ pluginDirs: [FIXTURES], skipDefaultDirs: true });
     await loader.loadAll();
     const tools = loader.getTools();
     const echoTool = tools.find((t) => t.name === "test-plugin__echo")!;
@@ -46,7 +46,7 @@ describe("PluginLoader", () => {
   });
 
   it("registers skills from loaded plugin", async () => {
-    const loader = new PluginLoader({ pluginDirs: [FIXTURES] });
+    const loader = new PluginLoader({ pluginDirs: [FIXTURES], skipDefaultDirs: true });
     await loader.loadAll();
     const skills = loader.getSkills();
     const greetSkill = skills.find((s) => s.name === "greet");
@@ -55,7 +55,7 @@ describe("PluginLoader", () => {
   });
 
   it("registers prompts from loaded plugin", async () => {
-    const loader = new PluginLoader({ pluginDirs: [FIXTURES] });
+    const loader = new PluginLoader({ pluginDirs: [FIXTURES], skipDefaultDirs: true });
     await loader.loadAll();
     const prompts = loader.getPrompts();
     const helloPrompt = prompts.find((p) => p.name === "hello");
@@ -64,7 +64,7 @@ describe("PluginLoader", () => {
   });
 
   it("skips plugin with invalid manifest (graceful skip)", async () => {
-    const loader = new PluginLoader({ pluginDirs: [FIXTURES] });
+    const loader = new PluginLoader({ pluginDirs: [FIXTURES], skipDefaultDirs: true });
     const results = await loader.loadAll();
     const invalidResult = results.find((r) => r.pluginName === "invalid-manifest-plugin");
     expect(invalidResult).toBeDefined();
@@ -74,7 +74,7 @@ describe("PluginLoader", () => {
   });
 
   it("skips plugin with missing entry file but still loads manifest tools", async () => {
-    const loader = new PluginLoader({ pluginDirs: [FIXTURES] });
+    const loader = new PluginLoader({ pluginDirs: [FIXTURES], skipDefaultDirs: true });
     const results = await loader.loadAll();
     const brokenResult = results.find((r) => r.pluginName === "broken-plugin");
     expect(brokenResult).toBeDefined();
@@ -84,7 +84,7 @@ describe("PluginLoader", () => {
   });
 
   it("loads manifest-only plugin with stub tool", async () => {
-    const loader = new PluginLoader({ pluginDirs: [FIXTURES] });
+    const loader = new PluginLoader({ pluginDirs: [FIXTURES], skipDefaultDirs: true });
     await loader.loadAll();
     const tools = loader.getTools();
     const stubTool = tools.find((t) => t.name === "manifest-only__stub-tool");
@@ -94,7 +94,7 @@ describe("PluginLoader", () => {
   });
 
   it("skips non-existent plugin directories", async () => {
-    const loader = new PluginLoader({ pluginDirs: ["/nonexistent/path"] });
+    const loader = new PluginLoader({ pluginDirs: ["/nonexistent/path"], skipDefaultDirs: true });
     const results = await loader.loadAll();
     expect(results).toHaveLength(0);
     expect(loader.count).toBe(0);
@@ -119,7 +119,7 @@ describe("PluginLoader", () => {
         };
       `);
 
-      const loader = new PluginLoader({ pluginDirs: [tmpDir] });
+      const loader = new PluginLoader({ pluginDirs: [tmpDir], skipDefaultDirs: true });
       const results = await loader.loadAll();
       expect(results).toHaveLength(1);
       expect(results[0]!.status).toBe("loaded");
@@ -133,6 +133,7 @@ describe("PluginLoader", () => {
     const configSource = new StaticConfigSource({ apiKey: "secret-123" });
     const loader = new PluginLoader({
       pluginDirs: [FIXTURES],
+      skipDefaultDirs: true,
       configSource,
     });
     await loader.loadAll();
@@ -152,7 +153,7 @@ describe("PluginLoader", () => {
       writeFileSync(resolve(dir1, "dup-plugin", "plugin.json"), manifest);
       writeFileSync(resolve(dir2, "dup-plugin", "plugin.json"), manifest);
 
-      const loader = new PluginLoader({ pluginDirs: [dir1, dir2] });
+      const loader = new PluginLoader({ pluginDirs: [dir1, dir2], skipDefaultDirs: true });
       await loader.loadAll();
       expect(loader.count).toBe(1);
     } finally {
@@ -175,7 +176,7 @@ describe("PluginLoader", () => {
         };
       `);
 
-      const loader = new PluginLoader({ pluginDirs: [tmpDir] });
+      const loader = new PluginLoader({ pluginDirs: [tmpDir], skipDefaultDirs: true });
       await loader.loadAll();
       await loader.destroyAll();
     } finally {
@@ -194,7 +195,7 @@ describe("PluginLoader", () => {
       writeFileSync(resolve(dir1, "plugin-a", "plugin.json"), JSON.stringify({ name: "plugin-a", version: "1.0.0" }));
       writeFileSync(resolve(dir2, "plugin-b", "plugin.json"), JSON.stringify({ name: "plugin-b", version: "2.0.0" }));
 
-      const loader = new PluginLoader({ pluginDirs: [dir1, dir2] });
+      const loader = new PluginLoader({ pluginDirs: [dir1, dir2], skipDefaultDirs: true });
       await loader.loadAll();
       expect(loader.count).toBe(2);
       const names = loader.getLoadedPlugins().map((p) => p.name).sort();
@@ -215,6 +216,7 @@ describe("PluginLoader", () => {
       };
       const loader = new PluginLoader({
         pluginDirs: [tmpDir],
+        skipDefaultDirs: true,
         journal: journal as any,
         runId: "test-run",
       });
@@ -242,6 +244,7 @@ describe("PluginLoader", () => {
     };
     const loader = new PluginLoader({
       pluginDirs: [FIXTURES],
+      skipDefaultDirs: true,
       journal: journal as any,
       runId: "test-run",
     });
