@@ -1,214 +1,124 @@
-# Helm 手动走查 (PR16)
+# Helm 手动走查 (PR17)
 
-## PR16 — CLI Interactive Mode (REPL)
-
-### 前置条件
+## 跑命令
 
 ```bash
 cd ~/projects-ai/helm/helm-dev
-pnpm install
-pnpm build
+pnpm install && pnpm build
+pnpm test                        # 全部测试（含 MCP 25 + CLI 76）
+pnpm -C packages/mcp test        # 只看 MCP 测试
+pnpm repl                        # 启动 REPL（需要 DEEPSEEK_API_KEY）
+pnpm repl:mcp                    # 启动 REPL + MCP calc server
 ```
 
-无需 API Key。REPL 默认使用 ScriptedProvider。
+## pnpm repl 启动过程
 
-### 新增/修改文件一览
+**命令**：`node packages/cli/dist/bin/run.js repl --provider=deepseek`
+
+**入口**：`packages/cli/bin/run.ts → main()`
+
+| 顺序 | 文件 | 做什么 |
+|------|------|--------|
+| 1 | `run.ts:249` `main()` | 解析 `process.argv`，发现是 `repl` 子命令 |
+| 2 | `run.ts:262` | `import("../src/repl.js")` 动态加载 REPL 模块 |
+| 3 | `run.ts:263` | `loadSettings()` 读 `.helm/settings.json` |
+| 4 | `run.ts:281` | `parseReplArgs()` 解析 `--provider`、`--mcp-server` 等 flag |
+| 5 | `run.ts:286-316` | 创建 Provider：读 `DEEPSEEK_API_KEY` 环境变量 → `new OpenAICompatibleProvider()` |
+| 6 | `run.ts:318` | 调 `startRepl(config)` → 进入 `packages/cli/src/repl.ts` |
+
+**repl.ts `startRepl()` 初始化**：
+
+| 顺序 | 行号 | 做什么 |
+|------|------|--------|
+| 7 | `repl.ts:290-293` | 创建 `JsonlJournal`（写 `/tmp/helm-repl-xxx.jsonl`） |
+| 8 | `repl.ts:299` | `new PermissionRuntime()` |
+| 9 | `repl.ts:316` | `new ToolRuntime(permissionRuntime)` |
+| 10 | `repl.ts:329` | `registerFileTools()` — 注册 read/write/edit/ls/glob/bash 工具 |
+| 11 | `repl.ts:336-357` | `new McpRegistry()` — 如果传了 `--mcp-server`，`connect()` 连 MCP server，`tools()` 注册到 ToolRuntime |
+| 12 | `repl.ts:567-577` | 构造 system prompt |
+| 13 | `repl.ts:579` | `messageHistory = [systemMessage]` |
+| 14 | `repl.ts:582-630` | 渲染欢迎框 |
+| 15 | `repl.ts:632-650` | 创建 `AgentLoop({ provider, toolRuntime, journal })` |
+| 16 | `repl.ts:470-480` | 创建 `readline` 接口，注册 `"line"` 回调 → **等待输入** |
+
+## 输入一句话后
 
 ```
-packages/core/src/
-├── (无修改)
+你输入 "帮我算 2+3" 回车
+  │
+  ├─ repl.ts "line" 回调
+  │     ├─ 检查是否是 / 命令（/exit, /help, /stats, /clear）
+  │     ├─ 不是 → handleUserInput(line)
+  │     │
+  │     └─ handleUserInput():
+  │           ├─ messageHistory.push({ role: "user", content: line })
+  │           ├─ turnCount++
+  │           ├─ AgentLoop.run(runId, line, messageHistory)
+  │           │     │
+  │           │     ├─ agent-loop.ts:259  provider.setTools(toolDefs)
+  │           │     ├─ agent-loop.ts:268  provider.send(messages, signal)    🔴 断点 1
+  │           │     │     │
+  │           │     │     └─ openai-compatible-provider.ts
+  │           │     │           278: helmToOpenAIMessages(messages)
+  │           │     │           279: helmToOpenAITools(this._tools)
+  │           │     │           282: client.chat.completions.create({...})   🔴 断点 2
+  │           │     │                  │
+  │           │     │                  └─ HTTP → DeepSeek API
+  │           │     │
+  │           │     ├─ LLM 返回 tool_calls → toolRuntime.execute(...) → 拼 tool result
+  │           │     └─ 下一轮 send()（messages 含 tool call + tool result 历史）
+  │           │
+  │           └─ messageHistory.push({ role: "assistant", content: reply })
+  │
+  └─ 终端渲染回复
+```
 
-packages/runtime/src/
-├── agent-loop.ts              # run() 支持 continueFrom + 返回 messages
-├── index.ts                   # 导出 MessageRecord, AgentLoopResult
-└── agent-loop.test.ts         # (向后兼容，无修改)
+## IDEA 断点位置
+
+右上角选 `Helm REPL` → Debug。这两个断点：
+
+| 文件 | 行号 | 看什么 |
+|------|------|--------|
+| `packages/runtime/src/agent-loop.ts` | **268** | `messages`（对话历史）、`this.toolRuntime.list()`（所有工具） |
+| `packages/provider-deepseek/src/openai-compatible-provider.ts` | **282** | `openaiMessages` + `openaiTools`，发给 LLM 的最终 JSON |
+
+Alt+F8 → `JSON.stringify(openaiMessages, null, 2)` 复制完整 prompt。
+
+## MCP 怎么接入的
+
+`repl.ts:336-357`，在 `startRepl()` 里：
+
+```typescript
+const mcpRegistry = new McpRegistry();
+if (config.mcpServers && config.mcpServers.length > 0) {
+  await mcpRegistry.connect(configs);           // 并行连所有 MCP server
+  for (const tool of mcpRegistry.tools()) {
+    toolRuntime.register(tool);                 // 注册到 ToolRuntime
+    permissionRuntime.allow({ pattern: tool.name, ... });
+  }
+}
+```
+
+MCP tools 和内置 tools 在 ToolRuntime 里平等对待。发给 LLM 时都是 OpenAI function calling 格式，只靠名称前缀 `serverName:toolName` 区分。
+
+## 改动文件
+
+```
+packages/mcp/src/
+├── types.ts         McpServerConfig (stdio) + McpHttpServerConfig (SSE/StreamableHTTP)
+├── client.ts        connect() 根据 transport 分发；connectHttp()
+├── registry.ts      多 server 管理，工具名加 serverName: 前缀
+└── client.test.ts   25 个测试
 
 packages/cli/
-├── bin/run.ts                 # +subcommand dispatch (run|repl|bare)
-├── bin/run.test.ts            # +12 REPL 测试
-├── src/repl.ts                # 新：REPL 模块 (~250 行)
-├── package.json               # +optionalDep: @helm/provider-deepseek
-└── tsconfig.json              # +include: src/**, +ref: provider-deepseek
+├── bin/run.ts       --mcp-server=<name>=<command> flag
+└── src/repl.ts      McpRegistry 集成（336-357 行）
 ```
 
-### Walkthrough 1: 启动 REPL → 输入 → 看到回复
+## 关键设计决策
 
-```bash
-echo -e "Hello, agent!\n/exit" | node packages/cli/dist/bin/run.js repl --provider=scripted
-```
-
-**输出：**
-
-```
-╭─────────────────────────────────────────────────────╮
-│                   Helm REPL                          │
-│  Type your message and press Enter to send.          │
-│  /help    — Show available commands                  │
-│  /clear   — Clear conversation history               │
-│  /exit    — Exit REPL                                │
-│  /stats   — Show session stats                       │
-╰─────────────────────────────────────────────────────╯
-
-Provider: scripted
-Journal: /tmp/helm-repl-xxxxx.jsonl
-Tools: read, write, edit, ls, glob
-
-> Goodbye.
-Journal → /tmp/helm-repl-xxxxx.jsonl
-```
-
-**看什么：**
-
-- 欢迎 banner 显示 REPL 模式、provider 名、可用工具列表。
-- `/exit` 退出，exit code 0。
-- Journal 写到 `/tmp/helm-repl-*.jsonl`。
-
----
-
-### Walkthrough 2: Tool call 显示
-
-```bash
-echo -e "Read the config file.\n/exit" | node packages/cli/dist/bin/run.js repl --provider=scripted --tools=packages/cli/fixtures/tools.json --perms=packages/cli/fixtures/perms.json
-```
-
-**输出（截取 tool call 部分）：**
-
-```
-  🔧 calculator({"expression":"2+3"})
-  📤 ["expression=2+3"]
-```
-
-**看什么：**
-
-- `🔧` 前缀显示 tool call 名称和参数。
-- `📤` 前缀显示 tool result（截断到 80 字符）。
-- REPL 的 journal interceptor 在 tool 执行时实时打印。
-
----
-
-### Walkthrough 3: `/clear` 清空历史再对话
-
-```bash
-echo -e "First message.\n/clear\nSecond message.\n/exit" | node packages/cli/dist/bin/run.js repl --provider=scripted
-```
-
-**输出：**
-
-```
-> ✔ Conversation history cleared.
->
-```
-
-**看什么：**
-
-- `/clear` 后 `messageHistory` 重置为空数组。
-- 后续对话从干净的上下文开始。
-
----
-
-### Walkthrough 4: Ctrl-C 中断 turn 后继续
-
-手动测试（需要 TTY）：
-
-```bash
-node packages/cli/dist/bin/run.js repl --provider=scripted
-```
-
-1. 输入一段话，Enter。
-2. 在 turn 执行期间按 Ctrl-C。
-3. 看到 `⚠ Interrupting...`。
-4. 继续输入下一句 —— REPL 不退出。
-
-**机制：** 每个 turn 创建独立的 `AbortController` + 临时 SIGINT handler。turn 结束后恢复原 handler。
-
----
-
-### Walkthrough 5: 长会话触发 compaction（PR14 回归）
-
-```bash
-echo -e "msg0\nmsg1\nmsg2\nmsg3\nmsg4\nmsg5\n/exit" | node packages/cli/dist/bin/run.js repl --provider=scripted --compaction=truncate --token-budget=400 --tools=packages/cli/fixtures/tools.json --perms=packages/cli/fixtures/perms.json
-```
-
-**输出（当 token 累积到 warning threshold）：**
-
-```
-  🗜️  Compaction: msgs 15→6
-```
-
----
-
-### Walkthrough 6: `/exit` 退出，检查 journal 完整性
-
-```bash
-cat /tmp/helm-repl-*.jsonl | python3 -c "
-import sys, json
-events = [json.loads(l) for l in sys.stdin if l.strip()]
-types = set(e['type'] for e in events)
-print('Event types:', sorted(types))
-"
-```
-
-**输出：**
-
-```
-Event types: ['run:end', 'run:start', 'tool:call', 'tool:result', 'turn:start']
-```
-
-**看什么：**
-
-- Journal 包含完整的 `run:start` ... `run:end` 生命周期。
-- 多轮对话的 turn 交错记录在同一个文件里。
-
----
-
-### Architecture
-
-```
-helm repl [flags]
-  └─ run.ts: parseReplArgs() → build provider → startRepl(config)
-       │
-       └─ repl.ts:
-            ├─ PermissionRuntime + ToolRuntime (same as batch)
-            ├─ Optional Compaction + TokenBudget
-            ├─ Journal interceptor (compact REPL display)
-            ├─ readline.createInterface (stdin/stdout)
-            ├─ State: messageHistory[], turnCount
-            └─ Input loop:
-                 ├─ /command → handle (exit/clear/help/stats/mode)
-                 └─ user message → AgentLoop.run(runId, msg, history)
-                      │
-                      ├─ AgentLoop sends to Provider
-                      ├─ Tool calls → journal interceptor prints
-                      └─ Returns {messages} → update history
-```
-
-**关键设计决策：**
-
-1. **AgentLoop 改动最小。** 仅加 `continueFrom` 参数和返回 `messages`。AgentLoop 仍然是唯一的 turn 执行者。
-2. **REPL 管理消息历史。** 每次用户输入创建一个新 AgentLoop run，传入累积的 `messageHistory`。run 结束后更新历史。
-3. **Provider 由调用者构建。** repl.ts 接受已构建的 Provider 实例，不依赖 `@helm/provider-deepseek`。run.ts 负责 provider 创建（含动态 import）。
-4. **node:readline 零依赖。** 不引入第三方 readline 库。Ctrl-C 通过临时 SIGINT handler + AbortController 处理。
-5. **Journal 单文件。** 所有 REPL turn 写同一个 `.jsonl`。每轮 run 有独立的 `runId`（`repl-xxxxx-t1`, `repl-xxxxx-t2`）。
-
-### CLI Flag 速查 (PR16 新增)
-
-| Flag | 值 | 说明 |
-| ---- | --- | --- |
-| `--provider` | `scripted`, `deepseek` | Provider 类型（默认 scripted） |
-| `--model` | `<name>` | 模型名（deepseek 时用） |
-| `--api-key` | `<key>` | API key（也可用 env） |
-| `--tools` | `<path>` | 工具 JSON 文件 |
-| `--perms` | `<path>` | 权限 JSON 文件 |
-| `--workspace` | `<path>` | workspace 根目录 |
-| `--max-turns` | `<n>` | 每轮最大 turn 数（默认 20） |
-
-### Java 类比
-
-| 概念 | Java 世界 |
-| ---- | --------- |
-| REPL loop | `while (true) { String line = reader.readLine(); ... }` |
-| messageHistory | `List<Message> conversationHistory` |
-| AgentLoop.run(continueFrom) | `agentLoop.run(userMessage, history)` |
-| Ctrl-C per turn | `try { ... } catch (InterruptedException e) { ... }` |
-| readline | `java.io.Console` / JLine |
-| Journal interceptor | SLF4J MDC / event listener |
+1. **`@helm/mcp` 独立包**，不污染 runtime
+2. **`@modelcontextprotocol/sdk` ^1.29.0**，不自己写协议层
+3. **transport 分发**：`config.transport` 做 discriminated union，stdio/SSE/StreamableHTTP
+4. **namespace 前缀** `serverName:toolName` 避免冲突
+5. **graceful degradation**：server 挂了 → error result 不抛异常

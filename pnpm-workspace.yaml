@@ -5,6 +5,7 @@ packages:
   - 'packages/replay'
   - 'packages/cli'
   - 'packages/provider-deepseek'
+  - 'packages/mcp'
 allowBuilds:
   esbuild: true
 minimumReleaseAgeExclude:

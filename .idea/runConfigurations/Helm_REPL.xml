@@ -1,9 +1,9 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="PR12: First Chat" type="js.build_tools.npm" folderName="PR12 Demo">
+  <configuration default="false" name="Helm REPL" type="js.build_tools.npm" folderName="PR17 MCP">
     <package-json value="$PROJECT_DIR$/package.json" />
     <command value="run" />
     <scripts>
-      <script value="demo:first-chat" />
+      <script value="repl" />
     </scripts>
     <arguments value="" />
     <node-interpreter value="project" />

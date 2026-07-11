@@ -9,6 +9,7 @@
   "references": [
     { "path": "../core" },
     { "path": "../runtime" },
+    { "path": "../mcp" },
     { "path": "../provider-deepseek" }
   ],
   "include": ["bin/**/*.ts", "src/**/*.ts"]

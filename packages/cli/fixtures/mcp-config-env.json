@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "echo": {
+      "command": "node",
+      "args": ["-e", "process.exit(0)"],
+      "env": { "MCP_DEBUG": "1" }
+    }
+  }
+}

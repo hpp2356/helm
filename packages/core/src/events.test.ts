@@ -166,4 +166,35 @@ describe("eventToString", () => {
     // JSONL requires no embedded newlines
     expect(result).not.toContain("\n");
   });
+
+  it("should serialize mcp:connect event", () => {
+    const event: RunEvent = {
+      type: "mcp:connect",
+      runId: "run-1",
+      serverName: "filesystem",
+      toolCount: 3,
+      transport: "stdio",
+      timestamp: 1717200000000,
+    };
+    const result = eventToString(event);
+    const parsed = JSON.parse(result);
+    expect(parsed.type).toBe("mcp:connect");
+    expect(parsed.serverName).toBe("filesystem");
+    expect(parsed.toolCount).toBe(3);
+    expect(parsed.transport).toBe("stdio");
+  });
+
+  it("should serialize mcp:disconnect event", () => {
+    const event: RunEvent = {
+      type: "mcp:disconnect",
+      runId: "run-1",
+      serverName: "filesystem",
+      timestamp: 1717200001000,
+    };
+    const result = eventToString(event);
+    const parsed = JSON.parse(result);
+    expect(parsed.type).toBe("mcp:disconnect");
+    expect(parsed.serverName).toBe("filesystem");
+    expect(parsed.runId).toBe("run-1");
+  });
 });

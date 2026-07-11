@@ -58,6 +58,32 @@ function formatTime(): string {
   return new Date().toISOString().slice(11, 19);
 }
 
+/** Claude CLI / VS Code style mcp.json schema. */
+interface McpConfigFile {
+  mcpServers: Record<string, {
+    command: string;
+    args?: string[];
+    env?: Record<string, string>;
+    riskLevel?: string;
+  }>;
+}
+
+/** Load --mcp-config JSON file → McpServerFlag[] (name + command + args). */
+function loadMcpConfig(configPath: string): Array<{ name: string; command: string; args?: string[]; env?: Record<string, string>; riskLevel?: string }> {
+  const cfg = loadJson<McpConfigFile>(configPath);
+  const result: Array<{ name: string; command: string; args?: string[]; env?: Record<string, string>; riskLevel?: string }> = [];
+  for (const [name, server] of Object.entries(cfg.mcpServers)) {
+    result.push({
+      name,
+      command: server.command,
+      args: server.args,
+      env: server.env,
+      riskLevel: server.riskLevel,
+    });
+  }
+  return result;
+}
+
 const VALID_STRATEGIES: NonInteractiveStrategy[] = [
   "auto-approve",
   "auto-deny",
@@ -131,6 +157,7 @@ function parseReplArgs(
   tokenBudgetMax?: number;
   maxTurns: number;
   systemPrompt?: string | null;
+  mcpServers: Array<{ name: string; command: string; args?: string[]; env?: Record<string, string>; riskLevel?: string }>;
 } {
   // Apply config file first, CLI flags override
   let providerKind: "scripted" | "deepseek" = base.provider ?? "scripted";
@@ -153,6 +180,7 @@ function parseReplArgs(
   let compactionKeepTurns = base.compactionKeepTurns ?? 2;
   let tokenBudgetMax: number | undefined = base.tokenBudget;
   let maxTurns = base.maxTurns ?? 20;
+  const mcpServers: Array<{ name: string; command: string; args?: string[]; env?: Record<string, string>; riskLevel?: string }> = [];
 
   if (base.nonInteractive && isNonInteractiveStrategy(base.nonInteractive)) {
     nonInteractive = base.nonInteractive;
@@ -215,6 +243,25 @@ function parseReplArgs(
       const v = Number(arg.slice("--max-turns=".length));
       if (!Number.isInteger(v) || v < 1) process.exit(1);
       maxTurns = v;
+    } else if (arg.startsWith("--mcp-server=")) {
+      const val = arg.slice("--mcp-server=".length);
+      const eq = val.indexOf("=");
+      if (eq === -1) {
+        console.error(`Invalid --mcp-server: ${val}. Expected <name>=<command>`);
+        process.exit(1);
+      }
+      const name = val.slice(0, eq);
+      const cmdStr = val.slice(eq + 1);
+      const parts = cmdStr.split(/\s+/);
+      mcpServers.push({ name, command: parts[0]!, args: parts.slice(1) });
+    } else if (arg.startsWith("--mcp-config=")) {
+      const configPath = arg.slice("--mcp-config=".length);
+      try {
+        mcpServers.push(...loadMcpConfig(configPath));
+      } catch (err) {
+        console.error(`Failed to load --mcp-config: ${(err as Error).message}`);
+        process.exit(1);
+      }
     }
   }
 
@@ -232,6 +279,7 @@ function parseReplArgs(
     tokenBudgetMax,
     maxTurns,
     systemPrompt,
+    mcpServers,
   };
 }
 
@@ -318,6 +366,7 @@ async function main() {
       tokenBudgetMax: parsed.tokenBudgetMax,
       maxTurns: parsed.maxTurns,
       systemPrompt: parsed.systemPrompt,
+      mcpServers: parsed.mcpServers,
     });
   }
 
