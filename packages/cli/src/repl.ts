@@ -595,15 +595,37 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   const isTTY = process.stdout.isTTY === true;
   if (isTTY) process.stdout.write(BRACKETED_PASTE_ON);
 
+  function renderSkillMenu(): string {
+    const entries: Array<{ name: string; description: string }> = [];
+    // Skills from registry
+    for (const s of skillRegistry.list()) {
+      entries.push({ name: `/${s.name}`, description: s.description });
+    }
+    // Direct commands not in registry
+    entries.push({ name: "/mode", description: "Switch permission strategy" });
+    entries.push({ name: "/theme", description: "Switch theme" });
+    entries.push({ name: "/compact", description: "Trigger compaction" });
+    // Aliases
+    entries.push({ name: "/quit", description: "Alias for /exit" });
+    entries.push({ name: "/q", description: "Alias for /exit" });
+
+    const maxNameLen = Math.max(...entries.map((e) => e.name.length));
+    const lines = entries.map((e) => {
+      const name = `  ${e.name.padEnd(maxNameLen)}`;
+      return theme.bold(name) + "  " + theme.dim(e.description);
+    });
+    const rule = theme.dim("─".repeat(Math.min(80, process.stdout.columns || 80)));
+    return lines.join("\n") + "\n" + rule;
+  }
+
   process.stdin.on("keypress", (_chunk, key?: { name?: string; ctrl?: boolean; shift?: boolean }) => {
     if (!key) return;
 
-    // Show skill hint when "/" is the only character on the line
+    // Show skill menu when "/" is the only character on the line
     if (!key.ctrl) {
       const rlI = rl as unknown as { line: string };
       if (rlI.line === "/") {
-        const names = COMMANDS.map((c) => c.slice(1));
-        setImmediate(() => emit(theme.dim(`skills: ${names.join(", ")}`)));
+        setImmediate(() => emit(renderSkillMenu()));
       }
     }
 
@@ -799,10 +821,9 @@ export async function startRepl(config: ReplConfig): Promise<void> {
         }
       }
 
-      // Just "/" — show hint
+      // Just "/" — show skill menu
       if (trimmed === "/") {
-        const names = COMMANDS.map((c) => c.slice(1));
-        console.log(theme.dim(`skills: ${names.join(", ")}`));
+        console.log(renderSkillMenu());
         hr(); reprompt(); return;
       }
 
