@@ -788,8 +788,6 @@ export async function startRepl(config: ReplConfig): Promise<void> {
       for (const listener of prevSigint) process.on("SIGINT", listener);
     }
 
-    hr();
-
     if (replClosing) return;
 
     const queued = sm.dequeue();
