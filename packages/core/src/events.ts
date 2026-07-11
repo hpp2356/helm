@@ -136,6 +136,20 @@ export type RunEvent =
       pluginName: string;
       message: string;
       timestamp: number;
+    }
+  | {
+      type: "skill:call";
+      runId: string;
+      skillName: string;
+      input: string;
+      timestamp: number;
+    }
+  | {
+      type: "skill:error";
+      runId: string;
+      skillName: string;
+      message: string;
+      timestamp: number;
     };
 
 export function eventToString(event: RunEvent): string {

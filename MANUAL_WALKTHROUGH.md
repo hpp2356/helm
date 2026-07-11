@@ -1,151 +1,161 @@
-# Helm 手动走查 (PR18)
+# Helm 手动走查 (PR19)
 
 ## 跑命令
 
 ```bash
 cd ~/projects-ai/helm/helm-dev
 pnpm install && pnpm build
-pnpm test                        # 全部测试（含 plugin 32 + runtime 196 + CLI 80）
-pnpm -C packages/plugin test     # 只看 plugin 测试
+pnpm test                        # 全部测试（含 skill 31 + plugin 32 + runtime 196 + CLI 80）
+pnpm -C packages/skill test      # 只看 skill 测试
 pnpm repl                        # 启动 REPL（需要 DEEPSEEK_API_KEY）
 ```
 
-## 场景 1：创建一个简单 plugin → 放到 plugin 目录 → 启动 Helm → tool 可用
-
-**步骤**：
-
-```bash
-# 1. 创建 plugin 目录
-mkdir -p ~/.helm/plugins/hello-plugin
-
-# 2. 创建 manifest
-cat > ~/.helm/plugins/hello-plugin/plugin.json << 'EOF'
-{
-  "name": "hello-plugin",
-  "version": "1.0.0",
-  "description": "A simple hello world plugin",
-  "main": "index.js",
-  "tools": [
-    {
-      "name": "say-hello",
-      "description": "Says hello to someone",
-      "parameters": {
-        "type": "object",
-        "properties": { "name": { "type": "string" } },
-        "required": ["name"]
-      },
-      "riskLevel": "LOW"
-    }
-  ]
-}
-EOF
-
-# 3. 创建入口文件
-cat > ~/.helm/plugins/hello-plugin/index.js << 'EOF'
-export default {
-  tools: [{
-    name: "say-hello",
-    async execute(args) {
-      return `Hello, ${args.name}!`;
-    },
-  }],
-  async init(config) {},
-  async destroy() {},
-};
-EOF
-
-# 4. 启动 REPL
-pnpm repl
-
-# 5. 在 REPL 里输入：
-> 请用 hello-plugin 的 say-hello 工具说 hello 给 Helm
-```
-
-**预期输出**：REPL 启动时显示 `Plugin "hello-plugin" v1.0.0 loaded (1 tools)`。
-
-## 场景 2：Plugin manifest 解析 → journal 里看 plugin:load 事件
+## 场景 1：/help 列出所有 skills
 
 **命令**：
 
 ```bash
-# 启动 REPL
 pnpm repl
-
-# REPL 启动后，journal 文件会显示在底部，例如：
-# Journal → /tmp/helm-repl-1234567890.jsonl
-
-# 查看 journal
-cat /tmp/helm-repl-*.jsonl | grep "plugin:load"
-```
-
-**预期 journal 输出**：
-
-```json
-{"type":"plugin:load","runId":"repl-xxx","pluginName":"hello-plugin","pluginVersion":"1.0.0","toolCount":1,"timestamp":1234567890}
-```
-
-## 场景 3：Plugin 加载失败 → skip，agent 正常启动
-
-**步骤**：
-
-```bash
-# 1. 创建一个无效 plugin
-mkdir -p ~/.helm/plugins/bad-plugin
-cat > ~/.helm/plugins/bad-plugin/plugin.json << 'EOF'
-{
-  "name": "INVALID NAME!",
-  "version": "1.0.0"
-}
-EOF
-
-# 2. 启动 REPL
-pnpm repl
-```
-
-**预期输出**：REPL 显示 `Plugin "INVALID NAME!" error: invalid plugin name "INVALID NAME!": must be lowercase alphanumeric with hyphens`，但 Helm 正常启动。
-
-**journal 输出**：
-
-```json
-{"type":"plugin:error","runId":"repl-xxx","pluginName":"INVALID NAME!","message":"[plugin:...] invalid plugin name...","timestamp":1234567890}
-```
-
-## 场景 4：`helm plugin add` 从 npm 安装 plugin
-
-**命令**：
-
-```bash
-# 假设有一个 npm 包 @example/helm-plugin
-helm plugin add @example/helm-plugin
+> /help
 ```
 
 **预期输出**：
 
 ```
-Installing plugin from npm: @example/helm-plugin...
-Plugin "example-plugin" v1.0.0 installed to ~/.helm/plugins/node_modules/@example/helm-plugin
+Skills (11):
+  /help  — List all available skills
+  /tools  — List all available tools
+  /clear  — Clear conversation history
+  /exit  — Exit REPL
+  /stats  — Show session statistics
+  /plugins  — List loaded plugins
+  /analyze  — Analyze current conversation   ← 如果有 user skill 文件
+
+Ctrl-C interrupt  |  Ctrl-D exit  |  Ctrl-X Ctrl-E external editor
 ```
 
-**注意**：`helm plugin add` 运行 `npm install --prefix ~/.helm/plugins <pkg>`，安装到 `~/.helm/plugins/node_modules/`。
+## 场景 2：/tools 列出所有 tools（包括 MCP tools）
 
-## 场景 5：Plugin 的 tool 在 REPL 里可用
+**命令**：
+
+```bash
+pnpm repl
+> /tools
+```
+
+**预期输出**：
+
+```
+Tools (7):
+  • read
+  • write
+  • edit
+  • ls
+  • glob
+  • bash
+  • hello-plugin__say-hello    ← 如果有 plugin 提供的 tool
+```
+
+## 场景 3：创建自定义 skill 文件 → /my-skill 可用
 
 **步骤**：
 
 ```bash
-# 确保 hello-plugin 已安装（场景 1）
+# 1. 创建 skill 目录
+mkdir -p ~/.helm/skills
+
+# 2. 创建 skill 文件
+cat > ~/.helm/skills/analyze.js << 'EOF'
+export default {
+  name: "analyze",
+  description: "Analyze current conversation",
+  handler: async (input, ctx) => {
+    return `Conversation has ${ctx.messages.length} messages. Input: "${input}"`;
+  },
+};
+EOF
+
+# 3. 启动 REPL
 pnpm repl
-
-# 在 REPL 里：
-> /tools
-# 输出应包含：hello-plugin__say-hello
-
-> 请用 hello-plugin__say-hello 工具，name 参数设为 "World"
+> /analyze hello world
 ```
 
-**预期**：LLM 调用 `hello-plugin__say-hello` 工具，返回 `Hello, World!`。
+**预期输出**：
 
-## pnpm repl 启动过程（含 Plugin 加载）
+```
+Conversation has 1 messages. Input: "hello world"
+```
+
+## 场景 4：Skill 调用 tool → 看 journal 里 skill:call + tool:call 事件
+
+**步骤**：
+
+```bash
+# 创建一个调用 tool 的 skill
+cat > ~/.helm/skills/read-file.js << 'EOF'
+export default {
+  name: "read-file",
+  description: "Read a file using the read tool",
+  handler: async (input, ctx) => {
+    const readTool = ctx.tools.get("read");
+    if (!readTool) return "No read tool available";
+    const result = await readTool.execute({ path: input });
+    return result;
+  },
+};
+EOF
+
+pnpm repl
+> /read-file /tmp/test.txt
+```
+
+**查看 journal**：
+
+```bash
+cat /tmp/helm-repl-*.jsonl | grep -E "skill:call|tool:call"
+```
+
+**预期 journal 输出**：
+
+```json
+{"type":"skill:call","runId":"repl-xxx","skillName":"read-file","input":"/tmp/test.txt","timestamp":1234567890}
+{"type":"tool:call","runId":"repl-xxx","turnIndex":0,"toolName":"read","args":{"path":"/tmp/test.txt"},"timestamp":1234567890}
+```
+
+## 场景 5：Plugin 提供的 skill → 自动出现在 /help 里
+
+**步骤**：
+
+```bash
+# 确保有 plugin 提供了 skill（参考 PR18 walkthrough）
+# 在 plugin.json 里声明 skill，在 index.js 里实现 handler
+
+pnpm repl
+> /help
+```
+
+**预期**：plugin 声明的 skill（如 `/greet`）会出现在 `/help` 列表里。
+
+## 场景 6：/clear + /exit 从 PR16 迁移为 skills
+
+**命令**：
+
+```bash
+pnpm repl
+
+# /clear 清空对话历史
+> hello
+> /clear
+# 输出: Conversation history cleared. (1 messages removed)
+
+# /exit 退出 REPL
+> /exit
+# 输出: Goodbye.
+```
+
+**注意**：`/quit` 和 `/q` 是 `/exit` 的别名，同样可用。
+
+## pnpm repl 启动过程（含 Skill 加载）
 
 **命令**：`node packages/cli/dist/bin/run.js repl --provider=deepseek`
 
@@ -157,90 +167,79 @@ pnpm repl
 | 2 | `run.ts:299` | `import("../src/repl.js")` 动态加载 REPL 模块 |
 | 3 | `run.ts:300` | `loadSettings()` 读 `.helm/settings.json` |
 | 4 | `run.ts:318` | `parseReplArgs()` 解析 `--provider`、`--mcp-server` 等 flag |
-| 5 | `run.ts:323-353` | 创建 Provider：读 `DEEPSEEK_API_KEY` 环境变量 → `new OpenAICompatibleProvider()` |
+| 5 | `run.ts:323-353` | 创建 Provider |
 | 6 | `run.ts:355` | 调 `startRepl(config)` → 进入 `packages/cli/src/repl.ts` |
 
 **repl.ts `startRepl()` 初始化**：
 
 | 顺序 | 行号 | 做什么 |
 |------|------|--------|
-| 7 | `repl.ts:290-293` | 创建 `JsonlJournal`（写 `/tmp/helm-repl-xxx.jsonl`） |
+| 7 | `repl.ts:290-293` | 创建 `JsonlJournal` |
 | 8 | `repl.ts:299` | `new PermissionRuntime()` |
 | 9 | `repl.ts:316` | `new ToolRuntime(permissionRuntime)` |
-| 10 | `repl.ts:329` | `registerFileTools()` — 注册 read/write/edit/ls/glob/bash 工具 |
-| 11 | `repl.ts:336-357` | `new McpRegistry()` — 如果传了 `--mcp-server`，`connect()` 连 MCP server，`tools()` 注册到 ToolRuntime |
-| 12 | `repl.ts:373-386` | **`new PluginLoader()` — 扫描 `~/.helm/plugins/` + `.helm/plugins/`，加载所有 plugin，注册 tools 到 ToolRuntime** |
-| 13 | `repl.ts:567-577` | 构造 system prompt |
-| 14 | `repl.ts:579` | `messageHistory = [systemMessage]` |
+| 10 | `repl.ts:329` | `registerFileTools()` |
+| 11 | `repl.ts:336-357` | MCP server 连接 |
+| 12 | `repl.ts:373-386` | Plugin 加载 |
+| 13 | `repl.ts:393-435` | **`new SkillRegistry()` — 注册内置 skills、plugin skills、user skills** |
+| 14 | `repl.ts:567-577` | 构造 system prompt |
 | 15 | `repl.ts:582-630` | 渲染欢迎框 |
-| 16 | `repl.ts:632-650` | 创建 `AgentLoop({ provider, toolRuntime, journal })` |
-| 17 | `repl.ts:470-480` | 创建 `readline` 接口，注册 `"line"` 回调 → **等待输入** |
+| 16 | `repl.ts:632-650` | 创建 `AgentLoop` |
+| 17 | `repl.ts:743+` | 创建 `readline` 接口 → **等待输入** |
 
-## Plugin 加载流程
+## Skill 执行流程
 
 ```
-PluginLoader.loadAll()
+用户输入 "/analyze hello"
   │
-  ├─ 扫描目录：
-  │   ├─ .helm/plugins/         （项目级，优先级高）
-  │   └─ ~/.helm/plugins/       （全局级）
+  ├─ repl.ts processInput()
+  │     ├─ trimmed.startsWith("/") → true
+  │     ├─ parseSkillInput("/analyze hello") → { name: "analyze", input: "hello" }
+  │     ├─ skillRegistry.execute("analyze", "hello", ctx)
+  │     │     ├─ emit skill:call event → journal
+  │     │     ├─ skill.handler("hello", ctx)
+  │     │     │     └─ 可以调用 ctx.tools.get("read").execute(...)
+  │     │     └─ return result text
+  │     └─ console.log(result)
   │
-  ├─ 对每个子目录：
-  │   ├─ readManifest(dir)      读 plugin.json
-  │   │   ├─ 校验 name/version 必填
-  │   │   ├─ 校验 name 格式（小写+连字符）
-  │   │   └─ 校验 tools/skills/prompts/config 数组格式
-  │   │
-  │   ├─ import(entryPath)      动态导入入口文件
-  │   │   └─ 失败 → emit plugin:error，skip
-  │   │
-  │   ├─ module.init(config)    调用初始化钩子
-  │   │   └─ 失败 → emit plugin:error，skip
-  │   │
-  │   └─ buildTools()           构建 Tool 对象
-  │       ├─ manifest 声明 + module 实现 → 完整 tool
-  │       └─ manifest 声明但无实现 → stub tool（返回 "no implementation"）
-  │
-  └─ emit plugin:load           journal 记录加载成功
+  └─ 终端显示结果
 ```
 
 ## IDEA 断点位置
 
-右上角选 `Helm REPL` → Debug。这两个断点：
-
 | 文件 | 行号 | 看什么 |
 |------|------|--------|
-| `packages/runtime/src/agent-loop.ts` | **268** | `messages`（对话历史）、`this.toolRuntime.list()`（所有工具，含 plugin tools） |
-| `packages/provider-deepseek/src/openai-compatible-provider.ts` | **282** | `openaiMessages` + `openaiTools`，发给 LLM 的最终 JSON |
-
-Alt+F8 → `JSON.stringify(openaiMessages, null, 2)` 复制完整 prompt。
+| `packages/skill/src/registry.ts` | `execute()` 方法 | skill name、input、handler 返回值 |
+| `packages/runtime/src/agent-loop.ts` | **268** | `messages`、`this.toolRuntime.list()` |
+| `packages/provider-deepseek/src/openai-compatible-provider.ts` | **282** | 发给 LLM 的最终 JSON |
 
 ## 改动文件
 
 ```
-packages/plugin/src/
-├── types.ts           PluginManifest, LoadedPlugin, PluginModule, PluginError
-├── manifest.ts        readManifest(), validateManifest()
-├── loader.ts          PluginLoader — 扫描目录、加载、注册 tools
-├── installer.ts       installPlugin() — npm install 到 plugin 目录
-├── index.ts           统一导出
-├── manifest.test.ts   manifest 解析测试
-└── loader.test.ts     loader 集成测试
+packages/skill/src/              (new)
+├── types.ts                     Skill, SkillContext, parseSkillInput, SkillError
+├── registry.ts                  SkillRegistry — 注册、查找、执行 skills
+├── builtins.ts                  createBuiltinSkills — /help, /tools, /clear, /exit, /stats, /plugins
+├── loader.ts                    loadUserSkills — 从 ~/.helm/skills/ 加载 .ts/.js 文件
+├── index.ts                     统一导出
+├── types.test.ts                parseSkillInput 测试
+├── registry.test.ts             SkillRegistry 测试
+├── builtins.test.ts             内置 skills 测试
+└── loader.test.ts               user skill 加载测试
 
-packages/core/src/
-└── events.ts          新增 plugin:load / plugin:error 事件类型
-
-packages/cli/
-├── bin/run.ts         新增 `helm plugin add <npm-package>` 子命令
-└── src/repl.ts        集成 PluginLoader（373-386 行）
+packages/core/src/events.ts      新增 skill:call / skill:error 事件类型
+packages/plugin/src/loader.ts    新增 skipDefaultDirs 选项（修复测试隔离问题）
+packages/cli/src/repl.ts         集成 SkillRegistry，替换硬编码 switch
+packages/cli/package.json        新增 @helm/skill 依赖
+packages/cli/tsconfig.json       新增 skill 引用
 ```
 
 ## 关键设计决策
 
-1. **`@helm/plugin` 独立包**，不污染 runtime
-2. **plugin.json manifest**，JSON 格式（和 settings.json 一致）
-3. **ESM default export**，plugin 入口文件导出 `{ tools, skills, init, destroy }`
-4. **namespace 前缀** `pluginName__toolName` 避免冲突（双下划线，和 MCP 的单下划线区分）
-5. **graceful skip**：manifest 无效或 init 失败 → emit plugin:error，不影响其他 plugin
-6. **first wins**：同名 plugin 只加载第一个（项目级优先于全局级）
-7. **plugin 配置**：环境变量 `HELM_PLUGIN_<NAME>_<KEY>` + manifest 默认值
+1. **`@helm/skill` 独立包**，不污染 runtime
+2. **SkillRegistry** — 注册、查找、执行 skills，first wins 兼容
+3. **内置 skills** — `/help`, `/tools`, `/clear`, `/exit`, `/stats`, `/plugins` 从硬编码迁移到 skill 系统
+4. **Plugin skills** — 从 plugin module 的 `skills` 字段自动注册
+5. **User skill files** — `~/.helm/skills/*.ts|*.js`，ESM default export
+6. **SkillContext 隔离** — skill 通过 `ctx.tools` 调 tools，不能直接访问 AgentLoop
+7. **graceful error** — handler 抛异常 → emit skill:error，显示错误，不 crash
+8. **动态命令列表** — COMMANDS 数组从 skillRegistry.list() 动态构建，Tab 补全自动生效

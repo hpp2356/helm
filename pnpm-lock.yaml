@@ -38,6 +38,9 @@ importers:
       '@helm/runtime':
         specifier: workspace:*
         version: link:../runtime
+      '@helm/skill':
+        specifier: workspace:*
+        version: link:../skill
     optionalDependencies:
       '@helm/provider-deepseek':
         specifier: workspace:*
@@ -92,6 +95,12 @@ importers:
         version: link:../core
 
   packages/runtime:
+    dependencies:
+      '@helm/core':
+        specifier: workspace:*
+        version: link:../core
+
+  packages/skill:
     dependencies:
       '@helm/core':
         specifier: workspace:*
