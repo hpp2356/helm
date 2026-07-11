@@ -576,21 +576,6 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   frame.attach();
   rl.setPrompt(theme.bold(theme.accent("› ")));
 
-  // Show skill hint when user types "/" at start of line
-  (rl as unknown as { on: (event: string, cb: (...args: unknown[]) => void) => void })
-    .on("keypress", (...args: unknown[]) => {
-      const key = args[1] as { name?: string; ctrl?: boolean } | undefined;
-      if (!key || key.ctrl) return;
-      if (key.name === "/") {
-        const rlI = rl as unknown as { line: string };
-        if (rlI.line === "/") {
-          const names = COMMANDS.map((c) => c.slice(1));
-          const hint = theme.dim(`skills: ${names.join(", ")}`);
-          setImmediate(() => emit(hint));
-        }
-      }
-    });
-
   const reprompt = (): void => {
     if (replClosing) return;
     try {
@@ -767,6 +752,12 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     if (welcomeActive) {
       welcomeActive = false;
       process.stdout.removeListener("resize", redrawWelcome);
+    }
+
+    if (trimmed === "/") {
+      const names = COMMANDS.map((c) => c.slice(1));
+      console.log(theme.dim(`skills: ${names.join(", ")}`));
+      hr(); reprompt(); return;
     }
 
     if (trimmed.startsWith("/")) {
