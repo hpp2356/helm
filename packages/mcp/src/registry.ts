@@ -1,5 +1,6 @@
 // packages/mcp/src/registry.ts
-import type { Tool } from "@helm/core";
+import type { Tool, RiskLevel } from "@helm/core";
+import type { JsonlJournal } from "@helm/core";
 import type { AnyMcpServerConfig } from "./types.js";
 import { McpClient } from "./client.js";
 
@@ -7,7 +8,7 @@ import { McpClient } from "./client.js";
  * Manages multiple MCP server connections and aggregates their tools.
  *
  * Usage:
- *   const registry = new McpRegistry();
+ *   const registry = new McpRegistry(journal, runId);
  *   await registry.connect(configs);
  *   const tools = registry.tools();
  *   for (const t of tools) toolRuntime.register(t);
@@ -16,6 +17,14 @@ import { McpClient } from "./client.js";
  */
 export class McpRegistry {
   private clients = new Map<string, McpClient>();
+  private riskLevels = new Map<string, RiskLevel | undefined>();
+  private journal?: JsonlJournal;
+  private runId: string;
+
+  constructor(journal?: JsonlJournal, runId?: string) {
+    this.journal = journal;
+    this.runId = runId ?? "mcp";
+  }
 
   /**
    * Connect to all configured MCP servers in parallel.
@@ -35,6 +44,20 @@ export class McpRegistry {
           const client = new McpClient(cfg);
           await client.connect(cfg);
           this.clients.set(cfg.name, client);
+          this.riskLevels.set(cfg.name, cfg.riskLevel as RiskLevel | undefined);
+
+          // Write journal event
+          if (this.journal) {
+            await this.journal.append({
+              type: "mcp:connect",
+              runId: this.runId,
+              serverName: cfg.name,
+              toolCount: client.tools.length,
+              transport: client.transportType,
+              timestamp: Date.now(),
+            });
+          }
+
           return { serverName: cfg.name, status: "connected" as const };
         } catch (err) {
           return {
@@ -59,6 +82,7 @@ export class McpRegistry {
     const out: Tool[] = [];
     for (const [serverName, client] of this.clients) {
       if (!client.available) continue;
+      const serverRisk = this.riskLevels.get(serverName);
       for (const mcpTool of client.tools) {
         const namespacedName = `${serverName}:${mcpTool.name}`;
         const originalName = mcpTool.name;
@@ -78,6 +102,7 @@ export class McpRegistry {
           name: namespacedName,
           description: `[MCP:${serverName}] ${mcpTool.description ?? mcpTool.name}`,
           parameters,
+          riskLevel: serverRisk,
           async execute(
             args: Record<string, unknown>,
             signal?: AbortSignal,
@@ -115,6 +140,21 @@ export class McpRegistry {
     return out;
   }
 
+  /**
+   * Combined instructions from all connected MCP servers.
+   * Returns empty string if no server provides instructions.
+   */
+  instructions(): string {
+    const parts: string[] = [];
+    for (const [serverName, client] of this.clients) {
+      if (!client.available) continue;
+      if (client.instructions) {
+        parts.push(`[MCP:${serverName}] ${client.instructions}`);
+      }
+    }
+    return parts.join("\n\n");
+  }
+
   /** Disconnect all MCP servers. Safe to call multiple times. */
   async disconnect(): Promise<void> {
     const names = [...this.clients.keys()];
@@ -122,11 +162,21 @@ export class McpRegistry {
       names.map(async (name) => {
         const client = this.clients.get(name);
         if (client) {
+          // Write journal event before disconnecting
+          if (this.journal) {
+            await this.journal.append({
+              type: "mcp:disconnect",
+              runId: this.runId,
+              serverName: name,
+              timestamp: Date.now(),
+            }).catch(() => {}); // best-effort
+          }
           await client.disconnect();
           this.clients.delete(name);
         }
       }),
     );
+    this.riskLevels.clear();
   }
 
   /** Number of currently connected (available) servers. */

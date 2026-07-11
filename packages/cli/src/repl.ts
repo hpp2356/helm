@@ -48,6 +48,9 @@ import { openExternalEditor } from "./editor.js";
 export interface McpServerFlag {
   name: string;
   command: string;
+  args?: string[];
+  env?: Record<string, string>;
+  riskLevel?: string;
 }
 
 export interface ReplConfig {
@@ -337,10 +340,16 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   }
 
   // ── MCP Servers ───────────────────────────────────────────────────────
-  const mcpRegistry = new McpRegistry();
+  const mcpRegistry = new McpRegistry(journal, runId);
   if (config.mcpServers && config.mcpServers.length > 0) {
     const results = await mcpRegistry.connect(
-      config.mcpServers.map((s) => ({ name: s.name, command: s.command })),
+      config.mcpServers.map((s) => ({
+        name: s.name,
+        command: s.command,
+        args: s.args,
+        env: s.env,
+        riskLevel: s.riskLevel as "LOW" | "MEDIUM" | "HIGH" | "CRITICAL" | undefined,
+      })),
     );
     for (const r of results) {
       if (r.status === "failed") {
@@ -568,6 +577,8 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   });
 
   // ── REPL state ────────────────────────────────────────────────────────
+  // Inject MCP server instructions into system prompt if available.
+  const mcpInstructions = mcpRegistry.instructions();
   const SYSTEM_MESSAGE: MessageRecord | null =
     config.systemPrompt !== undefined
       ? config.systemPrompt === null ? null : { role: "system", content: config.systemPrompt }
@@ -577,7 +588,8 @@ export async function startRepl(config: ReplConfig): Promise<void> {
           `<response_format>\nWrite replies as flowing, natural paragraphs of plain prose.\n` +
           `Do not use Markdown: no headings, no bullets, no **bold**, no tables.\n` +
           `Only use fenced code blocks when the user asks for code.\n` +
-          `</response_format>`,
+          `</response_format>` +
+          (mcpInstructions ? `\n\n<mcp_instructions>\n${mcpInstructions}\n</mcp_instructions>` : ""),
         };
 
   let messageHistory: MessageRecord[] = SYSTEM_MESSAGE ? [SYSTEM_MESSAGE] : [];

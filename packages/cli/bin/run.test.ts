@@ -21,6 +21,8 @@ const scriptSubagentChild = resolve(
   cliDir,
   "fixtures/script-subagent-child.jsonl",
 );
+const mcpConfig = resolve(cliDir, "fixtures/mcp-config.json");
+const mcpConfigEnv = resolve(cliDir, "fixtures/mcp-config-env.json");
 
 /** Run the CLI and return stdout + exit code (never throws). */
 function runCli(args: string[]): { stdout: string; stderr: string; status: number } {
@@ -529,5 +531,60 @@ describe("CLI REPL (helm repl)", () => {
       ["--provider=scripted"],
     );
     expect(status).toBe(0);
+  });
+});
+
+// ── --mcp-config flag ────────────────────────────────────────────────
+
+describe("CLI --mcp-config flag", () => {
+  function runRepl(
+    input: string,
+    args: string[] = [],
+  ): { stdout: string; stderr: string; status: number } {
+    const result = spawnSync("node", [bin, "repl", ...args], {
+      input,
+      encoding: "utf-8",
+      timeout: 10000,
+      maxBuffer: 1024 * 1024,
+    });
+    return {
+      stdout: result.stdout ?? "",
+      stderr: result.stderr ?? "",
+      status: result.status ?? 0,
+    };
+  }
+
+  it("loads MCP servers from JSON config file", () => {
+    const { stdout, status } = runRepl("/exit\n", [
+      `--mcp-config=${mcpConfig}`,
+    ]);
+    expect(status).toBe(0);
+    // MCP server connects (may fail gracefully), REPL still starts
+    expect(stdout).toContain("Helm v");
+  }, 30_000);
+
+  it("supports mcp-config with env vars", () => {
+    const { stdout, status } = runRepl("/exit\n", [
+      `--mcp-config=${mcpConfigEnv}`,
+    ]);
+    expect(status).toBe(0);
+    expect(stdout).toContain("Helm v");
+  }, 30_000);
+
+  it("merges --mcp-config with --mcp-server flags", () => {
+    const { stdout, status } = runRepl("/exit\n", [
+      `--mcp-config=${mcpConfig}`,
+      "--mcp-server=extra=echo hello",
+    ]);
+    expect(status).toBe(0);
+    expect(stdout).toContain("Helm v");
+  }, 30_000);
+
+  it("rejects invalid --mcp-config path", () => {
+    const { stderr, status } = runRepl("/exit\n", [
+      "--mcp-config=/nonexistent/path.json",
+    ]);
+    expect(status).toBe(1);
+    expect(stderr).toContain("Failed to load --mcp-config");
   });
 });

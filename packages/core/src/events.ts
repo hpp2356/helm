@@ -107,6 +107,20 @@ export type RunEvent =
       /** Summary of what the subagent did (tool calls, results, final answer). */
       summary: string;
       timestamp: number;
+    }
+  | {
+      type: "mcp:connect";
+      runId: string;
+      serverName: string;
+      toolCount: number;
+      transport: "stdio" | "sse" | "streamableHttp";
+      timestamp: number;
+    }
+  | {
+      type: "mcp:disconnect";
+      runId: string;
+      serverName: string;
+      timestamp: number;
     };
 
 export function eventToString(event: RunEvent): string {

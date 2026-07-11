@@ -23,6 +23,8 @@ export class McpClient {
   private transport: Transport | null = null;
   private _available = false;
   private _tools: McpToolDef[] = [];
+  private _instructions: string | undefined;
+  private _transportType: "stdio" | "sse" | "streamableHttp" = "stdio";
   readonly serverName: string;
   readonly timeoutMs: number;
   private connectPromise: Promise<void> | null = null;
@@ -30,6 +32,7 @@ export class McpClient {
   constructor(config: McpServerConfig | McpHttpServerConfig) {
     this.serverName = config.name;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this._transportType = config.transport ?? "stdio";
 
     this.client = new Client(
       { name: "helm", version: "0.0.0" },
@@ -45,6 +48,16 @@ export class McpClient {
   /** The tools discovered during the last successful listTools call. */
   get tools(): McpToolDef[] {
     return this._tools;
+  }
+
+  /** Server instructions from the MCP initialize handshake. */
+  get instructions(): string | undefined {
+    return this._instructions;
+  }
+
+  /** The transport type used for this connection. */
+  get transportType(): "stdio" | "sse" | "streamableHttp" {
+    return this._transportType;
   }
 
   /**
@@ -149,6 +162,7 @@ export class McpClient {
         inputSchema: t.inputSchema as McpToolDef["inputSchema"],
       }));
 
+      this._instructions = this.client.getInstructions() ?? undefined;
       this._available = true;
     } catch (err) {
       try { await transport.close(); } catch { /* best-effort */ }

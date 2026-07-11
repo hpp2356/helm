@@ -13,6 +13,8 @@ export interface McpServerConfig {
   env?: Record<string, string>;
   /** Connection timeout in ms (default 10_000). */
   timeoutMs?: number;
+  /** Risk level for all tools from this server (default MEDIUM). */
+  riskLevel?: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 }
 
 /**
@@ -40,6 +42,8 @@ export interface McpHttpServerConfig {
   headers?: Record<string, string>;
   /** Connection timeout in ms (default 10_000). */
   timeoutMs?: number;
+  /** Risk level for all tools from this server (default MEDIUM). */
+  riskLevel?: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 }
 
 /** Union of all MCP server config variants. */
