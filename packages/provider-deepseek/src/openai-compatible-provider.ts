@@ -1,5 +1,5 @@
 import type { Message, Provider, ToolCall } from "@helm/core";
-import { HelmError, providerError } from "@helm/core";
+import { HelmError, providerError, type StreamingBus } from "@helm/core";
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 
@@ -21,6 +21,11 @@ export interface OpenAICompatibleProviderOptions {
    * stream is passed here before assembly.
    */
   onText?: (text: string) => void;
+  /**
+   * StreamingBus for emitting streaming events. When set, each SSE
+   * delta (text, tool call, thinking) is emitted as a StreamingEvent.
+   */
+  streamingBus?: StreamingBus;
 }
 
 const DEFAULT_MODEL = "deepseek-v4-flash";
@@ -236,6 +241,7 @@ export class OpenAICompatibleProvider implements Provider {
   private maxTokens: number;
   private temperature: number;
   private onText?: (text: string) => void;
+  private _streamingBus?: StreamingBus;
 
   /** Optional: tools to include in every request (set by AgentLoop). */
   private _tools?: HelmToolDef[];
@@ -249,6 +255,12 @@ export class OpenAICompatibleProvider implements Provider {
     this.maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
     this.temperature = options.temperature ?? DEFAULT_TEMPERATURE;
     this.onText = options.onText;
+    this._streamingBus = options.streamingBus;
+  }
+
+  /** Set or replace the StreamingBus (used by REPL after construction). */
+  setStreamingBus(bus: StreamingBus | undefined): void {
+    this._streamingBus = bus;
   }
 
   /** Set tools from the Provider interface (called by AgentLoop). */
@@ -309,6 +321,7 @@ export class OpenAICompatibleProvider implements Provider {
         if (delta.content) {
           acc.content += delta.content;
           this.onText?.(delta.content);
+          this._streamingBus?.emit({ type: "text_delta", text: delta.content });
         }
 
         // Accumulate tool calls (streamed incrementally by index)
@@ -331,7 +344,21 @@ export class OpenAICompatibleProvider implements Provider {
             }
 
             acc.toolCalls.set(idx, existing);
+
+            // Emit tool call delta to streaming bus
+            this._streamingBus?.emit({
+              type: "tool_call_delta",
+              id: existing.id,
+              name: existing.name,
+              argumentsDelta: tcDelta.function?.arguments ?? "",
+            });
           }
+        }
+
+        // Accumulate thinking/reasoning tokens (DeepSeek-specific)
+        const reasoningContent = (delta as Record<string, unknown>).reasoning_content;
+        if (typeof reasoningContent === "string" && reasoningContent) {
+          this._streamingBus?.emit({ type: "thinking_delta", text: reasoningContent });
         }
 
         // Capture finish reason

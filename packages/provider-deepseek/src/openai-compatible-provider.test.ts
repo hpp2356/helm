@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { Message, ToolCall } from "@helm/core";
-import { HelmError } from "@helm/core";
+import type { Message, ToolCall, StreamingEvent } from "@helm/core";
+import { HelmError, StreamingBus } from "@helm/core";
 import { OpenAICompatibleProvider } from "./openai-compatible-provider.js";
 import type { OpenAICompatibleProviderOptions } from "./openai-compatible-provider.js";
 
@@ -850,6 +850,181 @@ describe("OpenAICompatibleProvider", () => {
       ]);
       provider.tools = undefined;
       expect(provider.tools).toBeUndefined();
+    });
+  });
+
+  // ── StreamingBus integration ──────────────────────────────────────────
+
+  describe("StreamingBus integration", () => {
+    it("emits text_delta events to the bus", async () => {
+      const chunks = [
+        textChunk("Hello"),
+        textChunk(" world!"),
+        finalChunk("stop"),
+      ];
+
+      const mockClient = createMockClient([]);
+      vi.mocked(mockClient.chat.completions.create).mockResolvedValueOnce(
+        mockStream(chunks),
+      );
+
+      const bus = new StreamingBus();
+      const received: StreamingEvent[] = [];
+      bus.on((e) => received.push(e));
+
+      const provider = makeProvider({ streamingBus: bus });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (provider as any).client = mockClient;
+
+      await provider.send([{ role: "user", content: "Hi" }]);
+
+      const textDeltas = received.filter((e) => e.type === "text_delta");
+      expect(textDeltas).toEqual([
+        { type: "text_delta", text: "Hello" },
+        { type: "text_delta", text: " world!" },
+      ]);
+    });
+
+    it("emits tool_call_delta events to the bus", async () => {
+      const chunks = [
+        toolCallChunk(0, { id: "call_1", name: "read" }),
+        toolCallChunk(0, { arguments: '{"filePath":"test.txt"}' }),
+        finalChunk("tool_calls"),
+      ];
+
+      const mockClient = createMockClient([]);
+      vi.mocked(mockClient.chat.completions.create).mockResolvedValueOnce(
+        mockStream(chunks),
+      );
+
+      const bus = new StreamingBus();
+      const received: StreamingEvent[] = [];
+      bus.on((e) => received.push(e));
+
+      const provider = makeProvider({ streamingBus: bus });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (provider as any).client = mockClient;
+
+      await provider.send([{ role: "user", content: "Read file" }]);
+
+      const toolDeltas = received.filter(
+        (e) => e.type === "tool_call_delta",
+      );
+      expect(toolDeltas.length).toBeGreaterThanOrEqual(2);
+      expect(toolDeltas[0]).toMatchObject({
+        type: "tool_call_delta",
+        id: "call_1",
+        name: "read",
+      });
+    });
+
+    it("emits thinking_delta for reasoning_content", async () => {
+      // Create chunks with reasoning_content (DeepSeek-specific)
+      const thinkingChunk = {
+        choices: [
+          {
+            index: 0,
+            delta: { reasoning_content: "Let me think..." },
+            finish_reason: null,
+          },
+        ],
+      };
+      const answerChunk = textChunk("The answer is 42.");
+      const chunks = [thinkingChunk, answerChunk, finalChunk("stop")];
+
+      const mockClient = createMockClient([]);
+      vi.mocked(mockClient.chat.completions.create).mockResolvedValueOnce(
+        mockStream(chunks),
+      );
+
+      const bus = new StreamingBus();
+      const received: StreamingEvent[] = [];
+      bus.on((e) => received.push(e));
+
+      const provider = makeProvider({ streamingBus: bus });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (provider as any).client = mockClient;
+
+      await provider.send([{ role: "user", content: "Think" }]);
+
+      const thinkingDeltas = received.filter(
+        (e) => e.type === "thinking_delta",
+      );
+      expect(thinkingDeltas).toEqual([
+        { type: "thinking_delta", text: "Let me think..." },
+      ]);
+    });
+
+    it("setStreamingBus replaces the bus", async () => {
+      const chunks = [textChunk("Hi"), finalChunk("stop")];
+
+      const mockClient = createMockClient([]);
+      vi.mocked(mockClient.chat.completions.create).mockResolvedValueOnce(
+        mockStream(chunks),
+      );
+
+      const bus1 = new StreamingBus();
+      const bus2 = new StreamingBus();
+      const received1: StreamingEvent[] = [];
+      const received2: StreamingEvent[] = [];
+      bus1.on((e) => received1.push(e));
+      bus2.on((e) => received2.push(e));
+
+      const provider = makeProvider({ streamingBus: bus1 });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (provider as any).client = mockClient;
+
+      provider.setStreamingBus(bus2);
+      await provider.send([{ role: "user", content: "Hi" }]);
+
+      // bus1 should NOT receive events (replaced before send)
+      expect(received1.filter((e) => e.type === "text_delta")).toHaveLength(0);
+      // bus2 SHOULD receive events
+      expect(received2.filter((e) => e.type === "text_delta")).toHaveLength(1);
+    });
+
+    it("works without a bus (backward compatible)", async () => {
+      const chunks = [textChunk("OK"), finalChunk("stop")];
+
+      const mockClient = createMockClient([]);
+      vi.mocked(mockClient.chat.completions.create).mockResolvedValueOnce(
+        mockStream(chunks),
+      );
+
+      const provider = makeProvider(); // no bus
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (provider as any).client = mockClient;
+
+      // Should not throw
+      const result = await provider.send([
+        { role: "user", content: "Hi" },
+      ]);
+      expect(asAssistant(result).content).toBe("OK");
+    });
+
+    it("stats accumulate correctly through the bus", async () => {
+      const chunks = [
+        textChunk("Hello"),
+        textChunk(" world"),
+        toolCallChunk(0, { id: "c1", name: "bash", arguments: '{"cmd":"ls"}' }),
+        finalChunk("tool_calls"),
+      ];
+
+      const mockClient = createMockClient([]);
+      vi.mocked(mockClient.chat.completions.create).mockResolvedValueOnce(
+        mockStream(chunks),
+      );
+
+      const bus = new StreamingBus();
+      const provider = makeProvider({ streamingBus: bus });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (provider as any).client = mockClient;
+
+      await provider.send([{ role: "user", content: "List files" }]);
+
+      expect(bus.stats.textTokens).toBe(11); // "Hello" + " world"
+      expect(bus.stats.textDeltaCount).toBe(2);
+      expect(bus.stats.toolCallDeltaCount).toBeGreaterThanOrEqual(1);
     });
   });
 });

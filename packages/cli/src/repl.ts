@@ -7,6 +7,7 @@ import {
   TokenBudget,
   type PermissionPolicy,
   type NonInteractiveStrategy,
+  StreamingBus,
 } from "@helm/core";
 import {
   AgentLoop,
@@ -70,6 +71,8 @@ export interface ReplConfig {
   systemPrompt?: string | null;
   configPath?: string;
   mcpServers?: McpServerFlag[];
+  /** StreamingBus for real-time streaming output. Created externally. */
+  streamingBus?: StreamingBus;
 }
 
 interface PermRule {
@@ -411,6 +414,7 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     },
     close: () => { replClosing = true; },
     registry: skillRegistry,
+    getStreamingBus: () => streamingBus,
   });
   for (const skill of builtinSkills) skillRegistry.register(skill);
 
@@ -465,6 +469,8 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     switch (e.type) {
       case "assistant:text": {
         // Model reasoning text before tool calls — bright bullet, full text color.
+        // Skip if streaming already printed the text in real-time.
+        if (streamedTextThisTurn) break;
         const text = String(e.content ?? "").trim();
         if (text) emit(theme.bold("● ") + text);
         break;
@@ -783,6 +789,19 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   let messageHistory: MessageRecord[] = SYSTEM_MESSAGE ? [SYSTEM_MESSAGE] : [];
   let turnCount = 0;
 
+  // ── Streaming integration ───────────────────────────────────────────────
+  const streamingBus = config.streamingBus;
+  let streamedTextThisTurn = false;
+
+  if (streamingBus) {
+    streamingBus.on((event) => {
+      if (event.type === "text_delta") {
+        streamedTextThisTurn = true;
+        process.stdout.write(event.text);
+      }
+    });
+  }
+
   // ── Welcome box ───────────────────────────────────────────────────────
   const home = process.env.HOME ?? "";
   const tilde = (p: string): string => home && p.startsWith(home) ? "~" + p.slice(home.length) : p;
@@ -920,6 +939,8 @@ export async function startRepl(config: ReplConfig): Promise<void> {
 
     turnCount++;
     sm.send("sending");
+    streamedTextThisTurn = false;
+    streamingBus?.emit({ type: "turn_start", turnIndex: turnCount });
 
     const turnController = new AbortController();
     const prevSigint = process.listeners("SIGINT") as ((...args: unknown[]) => void)[];
@@ -959,14 +980,26 @@ export async function startRepl(config: ReplConfig): Promise<void> {
 
       const lastMessage = result.messages[result.messages.length - 1];
       if (lastMessage?.role === "assistant" && lastMessage.content) {
-        const durationMs = Date.now() - statusState.turnStart;
-        console.log("\n" + renderAssistantCard(lastMessage.content, durationMs, pickVerb(turnCount - 1), theme));
+        if (streamedTextThisTurn) {
+          // Streaming already printed the text in real-time.
+          // Just print a newline separator and duration.
+          const durationMs = Date.now() - statusState.turnStart;
+          const stats = streamingBus?.stats;
+          const statsLine = stats
+            ? theme.dim(`  ↳ ${stats.textTokens} tokens, ${stats.toolCallDeltaCount} tool calls, ${(durationMs / 1000).toFixed(1)}s`)
+            : theme.dim(`  ↳ ${(durationMs / 1000).toFixed(1)}s`);
+          console.log("\n" + statsLine);
+        } else {
+          const durationMs = Date.now() - statusState.turnStart;
+          console.log("\n" + renderAssistantCard(lastMessage.content, durationMs, pickVerb(turnCount - 1), theme));
+        }
       }
 
       messageHistory = result.messages;
       statusState.durationMs = Date.now() - statusState.turnStart;
       statusState.currentTool = null;
       statusState.turnStart = 0;
+      streamingBus?.emit({ type: "turn_end", turnIndex: turnCount });
     } catch (err) {
       spinner.stop(); activeSpinner = null;
       const stateOnError = sm.state as TurnState;

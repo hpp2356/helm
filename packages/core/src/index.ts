@@ -3,6 +3,12 @@ export { JsonlJournal } from "./journal.js";
 export { type Message, type ToolCall, type Provider } from "./provider.js";
 export { type Tool } from "./tool.js";
 export {
+  type StreamingEvent,
+  type StreamingStats,
+  type StreamingEventHandler,
+  StreamingBus,
+} from "./streaming.js";
+export {
   RiskLevel,
   type Permission,
   type PermissionDecision,
