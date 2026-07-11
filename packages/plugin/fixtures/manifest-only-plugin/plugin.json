@@ -1,0 +1,11 @@
+{
+  "name": "manifest-only",
+  "version": "0.1.0",
+  "description": "Plugin with no entry file",
+  "tools": [
+    {
+      "name": "stub-tool",
+      "description": "A tool with no implementation"
+    }
+  ]
+}

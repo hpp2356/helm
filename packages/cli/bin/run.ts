@@ -370,6 +370,27 @@ async function main() {
     });
   }
 
+  // `helm plugin add <npm-package>` → install plugin
+  if (rawArgs[0] === "plugin") {
+    const { installPlugin } = await import("@helm/plugin");
+    const subcommand = rawArgs[1];
+    if (subcommand === "add" && rawArgs[2]) {
+      const npmPackage = rawArgs[2];
+      console.log(`Installing plugin from npm: ${npmPackage}...`);
+      try {
+        const result = await installPlugin(npmPackage);
+        console.log(`Plugin "${result.name}" v${result.version} installed to ${result.path}`);
+      } catch (err) {
+        console.error(`Failed to install plugin: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+    } else {
+      console.error("Usage: helm plugin add <npm-package>");
+      process.exit(1);
+    }
+    return;
+  }
+
   // `helm run ...` → batch mode
   if (rawArgs[0] === "run") {
     rawArgs.shift(); // consume "run" subcommand

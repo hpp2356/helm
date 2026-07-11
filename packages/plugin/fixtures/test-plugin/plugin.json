@@ -1,0 +1,41 @@
+{
+  "name": "test-plugin",
+  "version": "1.0.0",
+  "description": "A test plugin for unit tests",
+  "main": "index.js",
+  "tools": [
+    {
+      "name": "echo",
+      "description": "Echoes input back",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string" }
+        },
+        "required": ["text"]
+      },
+      "riskLevel": "LOW"
+    }
+  ],
+  "skills": [
+    {
+      "name": "greet",
+      "description": "Greets the user"
+    }
+  ],
+  "prompts": [
+    {
+      "name": "hello",
+      "description": "Hello prompt template",
+      "template": "Hello, {{name}}!"
+    }
+  ],
+  "config": [
+    {
+      "key": "apiKey",
+      "description": "API key for external service",
+      "required": false,
+      "default": "test-key"
+    }
+  ]
+}
