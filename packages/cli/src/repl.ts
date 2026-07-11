@@ -598,6 +598,15 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   process.stdin.on("keypress", (_chunk, key?: { name?: string; ctrl?: boolean; shift?: boolean }) => {
     if (!key) return;
 
+    // Show skill hint when "/" is the only character on the line
+    if (!key.ctrl) {
+      const rlI = rl as unknown as { line: string };
+      if (rlI.line === "/") {
+        const names = COMMANDS.map((c) => c.slice(1));
+        setImmediate(() => emit(theme.dim(`skills: ${names.join(", ")}`)));
+      }
+    }
+
     if (key.name === "paste-start") { paste.start(); return; }
     if (key.name === "paste-end") {
       const { block, echoedRows } = paste.end(rl.line);
@@ -754,12 +763,6 @@ export async function startRepl(config: ReplConfig): Promise<void> {
       process.stdout.removeListener("resize", redrawWelcome);
     }
 
-    if (trimmed === "/") {
-      const names = COMMANDS.map((c) => c.slice(1));
-      console.log(theme.dim(`skills: ${names.join(", ")}`));
-      hr(); reprompt(); return;
-    }
-
     if (trimmed.startsWith("/")) {
       const parts = trimmed.split(/\s+/);
       const cmd = parts[0]!.toLowerCase();
@@ -794,6 +797,13 @@ export async function startRepl(config: ReplConfig): Promise<void> {
           }
           hr(); reprompt(); return;
         }
+      }
+
+      // Just "/" — show hint
+      if (trimmed === "/") {
+        const names = COMMANDS.map((c) => c.slice(1));
+        console.log(theme.dim(`skills: ${names.join(", ")}`));
+        hr(); reprompt(); return;
       }
 
       // Skill dispatch — handles /help, /tools, /clear, /exit, /plugins, /stats, and user skills
