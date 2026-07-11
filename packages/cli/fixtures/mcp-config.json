@@ -1,8 +1,8 @@
 {
   "mcpServers": {
-    "echo": {
+    "calc": {
       "command": "node",
-      "args": ["-e", "process.exit(0)"]
+      "args": ["--import", "tsx", "packages/mcp/fixtures/calc-server.ts"]
     }
   }
 }

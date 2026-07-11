@@ -770,7 +770,7 @@ export async function startRepl(config: ReplConfig): Promise<void> {
       const lastMessage = result.messages[result.messages.length - 1];
       if (lastMessage?.role === "assistant" && lastMessage.content) {
         const durationMs = Date.now() - statusState.turnStart;
-        console.log("\n" + renderAssistantCard(lastMessage.content, durationMs, pickVerb(turnCount - 1), theme) + "\n");
+        console.log("\n" + renderAssistantCard(lastMessage.content, durationMs, pickVerb(turnCount - 1), theme));
       }
 
       messageHistory = result.messages;
@@ -787,8 +787,6 @@ export async function startRepl(config: ReplConfig): Promise<void> {
       process.removeAllListeners("SIGINT");
       for (const listener of prevSigint) process.on("SIGINT", listener);
     }
-
-    hr();
 
     if (replClosing) return;
 

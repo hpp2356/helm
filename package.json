@@ -9,7 +9,7 @@
     "run": "pnpm build && node packages/cli/dist/bin/run.js packages/cli/fixtures/tools.json packages/cli/fixtures/script.jsonl packages/cli/fixtures/perms.json",
     "run:deny": "pnpm build && node packages/cli/dist/bin/run.js packages/cli/fixtures/tools.json packages/cli/fixtures/script.jsonl packages/cli/fixtures/perms-deny-calc.json",
     "repl": "node packages/cli/dist/bin/run.js repl --provider=deepseek",
-    "repl:mcp": "node packages/cli/dist/bin/run.js repl --provider=deepseek --mcp-server=calc=tsx packages/mcp/fixtures/calc-server.ts"
+    "repl:mcp": "node packages/cli/dist/bin/run.js repl --provider=deepseek --mcp-server=calc=\"node --import tsx packages/mcp/fixtures/calc-server.ts\""
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
