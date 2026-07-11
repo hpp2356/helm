@@ -595,37 +595,107 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   const isTTY = process.stdout.isTTY === true;
   if (isTTY) process.stdout.write(BRACKETED_PASTE_ON);
 
-  function renderSkillMenu(): string {
-    const entries: Array<{ name: string; description: string }> = [];
-    // Skills from registry
+  // ── Completion menu state ──────────────────────────────────────────────
+  interface MenuEntry { name: string; description: string }
+  const menuState = { active: false, entries: [] as MenuEntry[], selected: 0, lineCount: 0 };
+
+  function buildMenuEntries(): MenuEntry[] {
+    const entries: MenuEntry[] = [];
     for (const s of skillRegistry.list()) {
       entries.push({ name: `/${s.name}`, description: s.description });
     }
-    // Direct commands not in registry
     entries.push({ name: "/mode", description: "Switch permission strategy" });
     entries.push({ name: "/theme", description: "Switch theme" });
     entries.push({ name: "/compact", description: "Trigger compaction" });
-    // Aliases
     entries.push({ name: "/quit", description: "Alias for /exit" });
     entries.push({ name: "/q", description: "Alias for /exit" });
+    return entries;
+  }
 
+  function renderCompletionMenu(): void {
+    const entries = menuState.entries;
     const maxNameLen = Math.max(...entries.map((e) => e.name.length));
-    const lines = entries.map((e) => {
-      const name = `  ${e.name.padEnd(maxNameLen)}`;
-      return theme.bold(name) + "  " + theme.dim(e.description);
-    });
-    const rule = theme.dim("─".repeat(Math.min(80, process.stdout.columns || 80)));
-    return lines.join("\n") + "\n" + rule;
+    const cols = Math.min(80, process.stdout.columns || 80);
+    const lines: string[] = [];
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i]!;
+      const name = `${e.name.padEnd(maxNameLen)}`;
+      if (i === menuState.selected) {
+        lines.push(theme.accent("▸ ") + theme.bold(name) + "  " + e.description);
+      } else {
+        lines.push("  " + theme.dim(name) + "  " + theme.dim(e.description));
+      }
+    }
+    lines.push(theme.dim("─".repeat(cols)));
+    menuState.lineCount = lines.length;
+    process.stdout.write("\n" + lines.join("\n"));
+    // Move cursor back up to the input line
+    process.stdout.write(`\x1b[${lines.length}A`);
+  }
+
+  function eraseCompletionMenu(): void {
+    if (menuState.lineCount > 0) {
+      // Move down past the menu, then erase upward
+      process.stdout.write(`\x1b[${menuState.lineCount}B`);
+      process.stdout.write(`\x1b[${menuState.lineCount}A\x1b[0J`);
+      menuState.lineCount = 0;
+    }
+  }
+
+  function activateMenu(): void {
+    menuState.active = true;
+    menuState.entries = buildMenuEntries();
+    menuState.selected = 0;
+    renderCompletionMenu();
+  }
+
+  function deactivateMenu(): void {
+    menuState.active = false;
+    eraseCompletionMenu();
   }
 
   process.stdin.on("keypress", (_chunk, key?: { name?: string; ctrl?: boolean; shift?: boolean }) => {
     if (!key) return;
 
-    // Show skill menu when "/" is the only character on the line
+    // ── Completion menu navigation ──────────────────────────────────────
+    if (menuState.active) {
+      if (key.name === "up") {
+        menuState.selected = (menuState.selected - 1 + menuState.entries.length) % menuState.entries.length;
+        eraseCompletionMenu();
+        renderCompletionMenu();
+        return;
+      }
+      if (key.name === "down") {
+        menuState.selected = (menuState.selected + 1) % menuState.entries.length;
+        eraseCompletionMenu();
+        renderCompletionMenu();
+        return;
+      }
+      if (key.name === "return") {
+        const selected = menuState.entries[menuState.selected]!;
+        deactivateMenu();
+        // Clear readline buffer so it doesn't emit a duplicate line event
+        const rlI = rl as unknown as { line: string; cursor: number; _refreshLine: () => void };
+        rlI.line = "";
+        rlI.cursor = 0;
+        rlI._refreshLine();
+        // Manually process the selected command
+        processInput(selected.name);
+        return;
+      }
+      if (key.name === "escape") {
+        deactivateMenu();
+        return;
+      }
+      // Any other key — deactivate menu and let normal processing happen
+      deactivateMenu();
+    }
+
+    // Show completion menu when "/" is the only character on the line
     if (!key.ctrl) {
       const rlI = rl as unknown as { line: string };
-      if (rlI.line === "/") {
-        setImmediate(() => emit(renderSkillMenu()));
+      if (rlI.line === "/" && !menuState.active) {
+        setImmediate(() => activateMenu());
       }
     }
 
@@ -821,10 +891,10 @@ export async function startRepl(config: ReplConfig): Promise<void> {
         }
       }
 
-      // Just "/" — show skill menu
+      // Just "/" — activate interactive menu
       if (trimmed === "/") {
-        console.log(renderSkillMenu());
-        hr(); reprompt(); return;
+        activateMenu();
+        reprompt(); return;
       }
 
       // Skill dispatch — handles /help, /tools, /clear, /exit, /plugins, /stats, and user skills
