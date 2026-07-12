@@ -23,6 +23,7 @@ import { registerFileTools } from "@helm/runtime";
 import { McpRegistry } from "@helm/mcp";
 import { PluginLoader } from "@helm/plugin";
 import { SkillRegistry, createBuiltinSkills, loadUserSkills, parseSkillInput } from "@helm/skill";
+import { PromptBuilder } from "@helm/prompt";
 import type { Provider, Tool, Message } from "@helm/core";
 import {
   PasteBuffer,
@@ -69,6 +70,14 @@ export interface ReplConfig {
   tokenBudgetMax?: number;
   maxTurns: number;
   systemPrompt?: string | null;
+  /** Path to a custom prompt template file. */
+  promptFile?: string;
+  /** Variables to inject into prompt templates (--prompt-var). */
+  promptVars?: Record<string, string>;
+  /** Output style name (--output-style). */
+  outputStyle?: string;
+  /** Text to append to the default prompt (--append-prompt). */
+  appendPrompt?: string;
   configPath?: string;
   mcpServers?: McpServerFlag[];
   /** StreamingBus for real-time streaming output. Created externally. */
@@ -771,20 +780,45 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   });
 
   // ── REPL state ────────────────────────────────────────────────────────
-  // Inject MCP server instructions into system prompt if available.
+  // Build system prompt using PromptBuilder.
   const mcpInstructions = mcpRegistry.instructions();
+  const promptBuilder = PromptBuilder.create()
+    .registerBuiltins({
+      agentName: "Helm",
+      providerName: config.providerName,
+      toolCount: toolRuntime.getToolNames().length,
+      mcpInstructions: mcpInstructions || undefined,
+    })
+    .loadVarsFiles();
+
+  // --prompt-file: load custom template
+  if (config.promptFile) {
+    promptBuilder.useTemplate(config.promptFile);
+  }
+
+  // --prompt-var: inject CLI variables
+  if (config.promptVars && Object.keys(config.promptVars).length > 0) {
+    promptBuilder.setVariables(config.promptVars);
+  }
+
+  // --output-style: apply output style
+  if (config.outputStyle) {
+    promptBuilder.applyOutputStyle(config.outputStyle);
+  }
+
+  // --append-prompt: append user text
+  if (config.appendPrompt) {
+    promptBuilder.append(config.appendPrompt);
+  }
+
+  // --system-prompt: direct override (null = no prompt, string = custom)
+  if (config.systemPrompt !== undefined) {
+    promptBuilder.setSystemPromptOverride(config.systemPrompt);
+  }
+
+  const builtPrompt = promptBuilder.build();
   const SYSTEM_MESSAGE: MessageRecord | null =
-    config.systemPrompt !== undefined
-      ? config.systemPrompt === null ? null : { role: "system", content: config.systemPrompt }
-      : { role: "system", content:
-          `You are Helm, an AI assistant powered by ${config.providerName}. ` +
-          `You are helpful, concise, and honest.\n\n` +
-          `<response_format>\nWrite replies as flowing, natural paragraphs of plain prose.\n` +
-          `Do not use Markdown: no headings, no bullets, no **bold**, no tables.\n` +
-          `Only use fenced code blocks when the user asks for code.\n` +
-          `</response_format>` +
-          (mcpInstructions ? `\n\n<mcp_instructions>\n${mcpInstructions}\n</mcp_instructions>` : ""),
-        };
+    builtPrompt.content ? { role: "system", content: builtPrompt.content } : null;
 
   let messageHistory: MessageRecord[] = SYSTEM_MESSAGE ? [SYSTEM_MESSAGE] : [];
   let turnCount = 0;

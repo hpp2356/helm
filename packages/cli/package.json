@@ -16,6 +16,7 @@
     "@helm/runtime": "workspace:*",
     "@helm/mcp": "workspace:*",
     "@helm/plugin": "workspace:*",
+    "@helm/prompt": "workspace:*",
     "@helm/skill": "workspace:*"
   },
   "optionalDependencies": {

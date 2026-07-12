@@ -158,6 +158,10 @@ function parseReplArgs(
   tokenBudgetMax?: number;
   maxTurns: number;
   systemPrompt?: string | null;
+  promptFile?: string;
+  promptVars: Record<string, string>;
+  outputStyle?: string;
+  appendPrompt?: string;
   mcpServers: Array<{ name: string; command: string; args?: string[]; env?: Record<string, string>; riskLevel?: string }>;
 } {
   // Apply config file first, CLI flags override
@@ -181,6 +185,10 @@ function parseReplArgs(
   let compactionKeepTurns = base.compactionKeepTurns ?? 2;
   let tokenBudgetMax: number | undefined = base.tokenBudget;
   let maxTurns = base.maxTurns ?? 20;
+  let promptFile: string | undefined;
+  const promptVars: Record<string, string> = {};
+  let outputStyle: string | undefined;
+  let appendPrompt: string | undefined;
   const mcpServers: Array<{ name: string; command: string; args?: string[]; env?: Record<string, string>; riskLevel?: string }> = [];
 
   if (base.nonInteractive && isNonInteractiveStrategy(base.nonInteractive)) {
@@ -263,6 +271,20 @@ function parseReplArgs(
         console.error(`Failed to load --mcp-config: ${(err as Error).message}`);
         process.exit(1);
       }
+    } else if (arg.startsWith("--prompt-file=")) {
+      promptFile = arg.slice("--prompt-file=".length);
+    } else if (arg.startsWith("--prompt-var=")) {
+      const val = arg.slice("--prompt-var=".length);
+      const eqIdx = val.indexOf("=");
+      if (eqIdx <= 0) {
+        console.error(`Invalid --prompt-var: ${val}. Expected key=value`);
+        process.exit(1);
+      }
+      promptVars[val.slice(0, eqIdx)] = val.slice(eqIdx + 1);
+    } else if (arg.startsWith("--output-style=")) {
+      outputStyle = arg.slice("--output-style=".length);
+    } else if (arg.startsWith("--append-prompt=")) {
+      appendPrompt = arg.slice("--append-prompt=".length);
     }
   }
 
@@ -280,6 +302,10 @@ function parseReplArgs(
     tokenBudgetMax,
     maxTurns,
     systemPrompt,
+    promptFile,
+    promptVars,
+    outputStyle,
+    appendPrompt,
     mcpServers,
   };
 }
@@ -369,6 +395,10 @@ async function main() {
       tokenBudgetMax: parsed.tokenBudgetMax,
       maxTurns: parsed.maxTurns,
       systemPrompt: parsed.systemPrompt,
+      promptFile: parsed.promptFile,
+      promptVars: parsed.promptVars,
+      outputStyle: parsed.outputStyle,
+      appendPrompt: parsed.appendPrompt,
       mcpServers: parsed.mcpServers,
       streamingBus,
     });
