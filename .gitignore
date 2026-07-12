@@ -40,3 +40,7 @@ operator-kits/
 *.log
 npm-debug.log*
 pnpm-debug.log*
+.helm/memory/
+~/
+.helm/check-bash.sh
+.helm/hooks.json
