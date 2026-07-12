@@ -28,6 +28,7 @@ import { HookRuntime } from "@helm/hooks";
 import type { HookEvent } from "@helm/hooks";
 import { TelemetryManager, loadTelemetryConfig } from "@helm/telemetry";
 import { UsageTracker } from "@helm/usage";
+import { MemoryStore } from "@helm/memory";
 import type { Provider, Tool, Message } from "@helm/core";
 import {
   PasteBuffer,
@@ -102,6 +103,10 @@ export interface ReplConfig {
   budgetWarning?: number;
   /** Disable budget checks (--no-budget). */
   noBudget?: boolean;
+  /** Disable memory loading (--no-memory). */
+  noMemory?: boolean;
+  /** Disable auto-memory writing (--no-auto-memory). */
+  noAutoMemory?: boolean;
   configPath?: string;
   mcpServers?: McpServerFlag[];
   /** StreamingBus for real-time streaming output. Created externally. */
@@ -460,6 +465,7 @@ export async function startRepl(config: ReplConfig): Promise<void> {
       session: usageTracker.formatSessionStatus(),
       daily: usageTracker.formatDailyStatus(),
     }),
+    getMemoryStore: () => memoryStore,
     clearMessages: () => {
       const count = messageHistory.length;
       messageHistory = SYSTEM_MESSAGE ? [{ ...SYSTEM_MESSAGE }] : [];
@@ -617,6 +623,15 @@ export async function startRepl(config: ReplConfig): Promise<void> {
         break;
       case "skill:error":
         emit(renderSystemNotice(`Skill "/${e.skillName}" error: ${e.message}`, theme));
+        break;
+      case "memory:load":
+        // Silent — memory loading is background
+        break;
+      case "memory:write":
+        emit(renderSystemNotice(`Memory written (${e.memoryType}${e.trigger ? `, trigger=${e.trigger}` : ""})`, theme));
+        break;
+      case "memory:clear":
+        emit(renderSystemNotice(`Memory cleared (scope=${e.scope})`, theme));
         break;
     }
     await originalAppend(event);
@@ -915,6 +930,46 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     },
   );
 
+  // ── Memory Store ─────────────────────────────────────────────────────────────
+  const memoryStore = config.noMemory ? undefined : new MemoryStore();
+
+  // Load memory and inject into system prompt
+  if (memoryStore && SYSTEM_MESSAGE) {
+    const memResult = memoryStore.load();
+
+    // Emit journal events for loaded files
+    for (const entry of memResult.instructions) {
+      await journal.append({
+        type: "memory:load",
+        runId,
+        source: entry.source,
+        scope: entry.scope === "session" ? "project" : entry.scope,
+        lines: entry.content.split("\n").length,
+        timestamp: Date.now(),
+      });
+    }
+    for (const entry of memResult.auto) {
+      await journal.append({
+        type: "memory:load",
+        runId,
+        source: entry.source,
+        scope: "project",
+        lines: entry.content.split("\n").length,
+        timestamp: Date.now(),
+      });
+    }
+
+    // Inject memory into system prompt
+    const instructionText = memoryStore.getInstructionText();
+    const autoText = memoryStore.getAutoText();
+    const memoryParts: string[] = [];
+    if (instructionText) memoryParts.push(instructionText);
+    if (autoText) memoryParts.push("## Auto Memory\n\n" + autoText);
+    if (memoryParts.length > 0) {
+      SYSTEM_MESSAGE.content += "\n\n" + memoryParts.join("\n\n");
+    }
+  }
+
   // ── Session start hook ─────────────────────────────────────────────────────
   try {
     const sessionResult = await hookRuntime.execute("session:start");
@@ -968,6 +1023,11 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   tips.push(`${theme.dim("Journal")}   ${tilde(journalPath)}`);
   const hookCount = Object.values(hookRuntime.getConfig().hooks).reduce((sum, rules) => sum + (rules?.length ?? 0), 0);
   if (hookCount > 0) tips.push(`${theme.dim("Hooks")}     ${hookCount} rule(s)`);
+  if (memoryStore) {
+    const memSummary = memoryStore.summary();
+    const memTotal = memSummary.instructions + memSummary.auto + memSummary.rules;
+    if (memTotal > 0) tips.push(`${theme.dim("Memory")}   ${memTotal} entry/ies`);
+  }
   tips.push("");
   tips.push(theme.italic(theme.dim("/help for commands")));
 

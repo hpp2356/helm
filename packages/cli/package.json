@@ -20,7 +20,8 @@
     "@helm/prompt": "workspace:*",
     "@helm/skill": "workspace:*",
     "@helm/telemetry": "workspace:*",
-    "@helm/usage": "workspace:*"
+    "@helm/usage": "workspace:*",
+    "@helm/memory": "workspace:*"
   },
   "optionalDependencies": {
     "@helm/provider-deepseek": "workspace:*"

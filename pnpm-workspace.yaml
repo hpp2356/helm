@@ -12,6 +12,7 @@ packages:
   - 'packages/hooks'
   - 'packages/telemetry'
   - 'packages/usage'
+  - 'packages/memory'
 allowBuilds:
   esbuild: true
 minimumReleaseAgeExclude:

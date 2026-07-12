@@ -1,4 +1,4 @@
-# Helm 手动走查 (PR24)
+# Helm 手动走查 (PR25)
 
 ## 跑命令
 
@@ -6,238 +6,288 @@
 cd ~/projects-ai/helm/helm-dev
 pnpm install && pnpm build
 pnpm test                       # 全部测试
-pnpm -C packages/usage test     # 只看 usage 测试（76 个）
+pnpm -C packages/memory test    # 只看 memory 测试（35 个）
 pnpm repl                       # 启动 REPL
 ```
 
-## 场景 1：实时成本 — 看 session 中的成本变化
+## 场景 1：项目指令 — 创建 .helm/memory/project.md
 
-**命令**：
-
-```bash
-pnpm repl --provider=deepseek
-> Hello, how are you?
-> /usage
-```
-
-**预期行为**：
-
-- `/usage` 显示当前 session 的 token 使用和成本
-- 格式化显示 input/output tokens 和总成本
-
-**输出示例**：
-
-```
-╭─ Session Usage ─────────────────────────────╮
-│ Model:         deepseek-chat                │
-│ Input tokens:           150 (cached:        0) │
-│ Output tokens:                           42 │
-│ Total cost:    $0.000063                    │
-│ Duration:      5s                           │
-╰──────────────────────────────────────────────╯
-
-╭─ Daily Usage ───────────────────────────────╮
-│ Sessions:                                  1 │
-│ Total cost:  $0.0001                        │
-│ Budget:      No limit                       │
-╰──────────────────────────────────────────────╯
-```
-
-## 场景 2：/usage 命令 — 看 token 和成本统计
-
-**命令**：
+**创建 memory 文件**：
 
 ```bash
-pnpm repl --provider=deepseek
-> What is 2+2?
-> What is the capital of France?
-> /usage
-```
+mkdir -p .helm/memory
+cat > .helm/memory/project.md << 'EOF'
+---
+type: instruction
+project: helm
+created: 2026-07-12
+updated: 2026-07-12
+---
 
-**预期行为**：
+## 构建命令
 
-- 显示累积的 token 使用量
-- 显示总成本
-- 显示 session 时长
+- `pnpm install` 安装依赖
+- `pnpm test` 运行测试
+- `pnpm build` 构建项目
 
-## 场景 3：Budget 设置 — 设置 session 预算
+## 编码规范
 
-**命令**：
-
-```bash
-pnpm repl --provider=deepseek --budget-session=0.01
-> Hello
-> /usage
-```
-
-**预期行为**：
-
-- 设置 session 预算为 $0.01
-- `/usage` 显示预算使用百分比
-
-## 场景 4：Budget 警告 — 达到阈值时的警告
-
-**命令**：
-
-```bash
-pnpm repl --provider=deepseek --budget-session=0.001 --budget-warning=0.5
-> [发送多条消息直到接近预算]
-```
-
-**预期行为**：
-
-- 当成本达到预算的 50% 时显示警告
-- 警告格式：`Session budget warning: $X / $Y (Z%)`
-
-## 场景 5：超预算处理 — 超出预算时的行为
-
-**命令**：
-
-```bash
-pnpm repl --provider=deepseek --budget-session=0.0001
-> [发送消息直到超预算]
-```
-
-**预期行为**：
-
-- 超出预算时显示错误消息
-- 格式：`Session budget exceeded: $X / $Y (Z%)`
-- 用户可选择继续或停止
-
-## 场景 6：自定义价格 — 修改价格表
-
-**创建自定义价格文件**：
-
-```bash
-cat > ~/.helm/prices.json << 'EOF'
-{
-  "deepseek": {
-    "deepseek-chat": {
-      "input": 0.20,
-      "cached": 0.10,
-      "output": 0.40
-    }
-  }
-}
+- 使用 TypeScript strict 模式
+- 优先用 interface 而不是 type
+- 函数返回值必须显式声明类型
 EOF
 ```
 
+**启动 REPL**：
+
+```bash
+pnpm repl
+> /memory show
+```
+
+**预期输出**：
+
+```
+── Instructions ──
+  [project] 构建命令
+    - `pnpm install` 安装依赖 | - `pnpm test` 运行测试 | - `pnpm build` 构建项目
+  [project] 编码规范
+    - 使用 TypeScript strict 模式 | - 优先用 interface 而不是 type
+```
+
+## 场景 2：Auto Memory — agent 自动记录学习
+
+**创建 auto memory**：
+
+```bash
+cat > .helm/memory/auto.md << 'EOF'
+---
+type: auto
+project: helm
+created: 2026-07-12
+updated: 2026-07-12
+---
+
+### discovery: 2026-07-12
+
+vitest 测试失败时，先运行 `pnpm typecheck` 检查类型错误。
+
+### correction: 2026-07-12
+
+用户偏好中文回复，代码注释用英文。
+EOF
+```
+
+**启动 REPL**：
+
+```bash
+pnpm repl
+> /memory show
+```
+
+**预期输出**：
+
+```
+── Instructions ──
+  [project] 构建命令
+    ...
+
+── Auto Memory ──
+  discovery: 2026-07-12
+    vitest 测试失败时，先运行 `pnpm typecheck` 检查类型错误。
+  correction: 2026-07-12
+    用户偏好中文回复，代码注释用英文。
+```
+
+## 场景 3：Memory 规则 — 创建 rules/typescript.md
+
+**创建规则文件**：
+
+```bash
+mkdir -p .helm/memory/rules
+cat > .helm/memory/rules/typescript.md << 'EOF'
+---
+description: TypeScript 编码规范
+globs: **/*.ts
+---
+
+- 使用 strict 模式
+- 优先用 interface 而不是 type
+- 函数返回值必须显式声明类型
+- 使用 async/await 而不是 .then()
+EOF
+```
+
+**启动 REPL**：
+
+```bash
+pnpm repl
+> /memory show
+```
+
+**预期输出**（在 Rules 部分）：
+
+```
+── Rules ──
+  TypeScript 编码规范  globs=[**/*.ts]
+```
+
+## 场景 4：Memory 命令 — list/show/search
+
 **命令**：
 
 ```bash
-pnpm repl --provider=deepseek
-> Hello
-> /usage
+pnpm repl
+> /memory list
+> /memory show
+> /memory search pnpm
 ```
+
+**预期输出**：
+
+`/memory list`:
+```
+Memory summary:
+  Instructions: 2 section(s)
+  Auto memory:  2 section(s)
+  Rules:        1 rule(s)
+  Total lines:  25
+```
+
+`/memory search pnpm`:
+```
+Found 1 match(es) for "pnpm":
+  /path/to/.helm/memory/project.md: - `pnpm install` 安装依赖
+```
+
+## 场景 5：跨 Session — 新 session 中看到之前的 memory
+
+**步骤**：
+
+1. 创建 memory 文件（如场景 1）
+2. 启动 REPL：`pnpm repl`
+3. 退出 REPL：`/exit`
+4. 再次启动 REPL：`pnpm repl`
+5. 运行 `/memory show`
 
 **预期行为**：
 
-- 使用自定义价格计算成本
-- 成本应高于默认价格
+- 新 session 自动加载之前的 memory
+- Agent 知道之前的构建命令和编码规范
+- 无需重新创建 memory 文件
 
-## 场景 7：Usage 文件 — 检查 ~/.helm/usage/
+## 场景 6：Memory 导出导入 — 备份和恢复
+
+**导出**：
+
+```bash
+pnpm repl
+> /memory export
+```
+
+**预期输出**：
+
+```markdown
+# Helm Memory Export
+
+## Instructions
+
+### 构建命令
+
+- `pnpm install` 安装依赖
+...
+
+## Auto Memory
+
+### discovery: 2026-07-12
+...
+```
+
+**导入**（在新项目中恢复）：
+
+```bash
+# 在新项目中
+mkdir -p .helm/memory
+pnpm repl
+> /memory import ## 构建命令\n\n- pnpm test
+```
+
+## 场景 7：Journal 输出 — 看 memory 相关事件
 
 **命令**：
 
 ```bash
-ls -la ~/.helm/usage/
-cat ~/.helm/usage/2026-07-12.jsonl
+pnpm repl
+> /stats
+# 查看 journal 路径
+# 退出后查看 journal 文件
+cat /tmp/helm-repl-*.jsonl | grep memory
 ```
 
-**预期行为**：
-
-- 每天一个 JSONL 文件
-- 每条记录包含 session_id, tokens, cost, duration
-
-**JSONL 格式**：
+**预期 Journal 事件**：
 
 ```json
-{
-  "session_id": "session-1234567890",
-  "timestamp": "2026-07-12T10:30:00.000Z",
-  "model": "deepseek-chat",
-  "provider": "deepseek",
-  "tokens": {
-    "input_tokens": 150,
-    "cached_tokens": 0,
-    "output_tokens": 42,
-    "reasoning_tokens": 0
-  },
-  "cost": {
-    "input_cost": 0.000021,
-    "cached_cost": 0,
-    "output_cost": 0.000012,
-    "reasoning_cost": 0,
-    "total_cost": 0.000033
-  },
-  "duration_ms": 5000
-}
+{"type":"memory:load","runId":"repl-...","source":"/path/.helm/memory/project.md","scope":"project","lines":15,"timestamp":...}
+{"type":"memory:load","runId":"repl-...","source":"/path/.helm/memory/auto.md","scope":"project","lines":8,"timestamp":...}
 ```
 
 ## CLI Flags
 
 | Flag | 说明 |
 |------|------|
-| `--budget-session=X` | Session 预算上限（USD） |
-| `--budget-daily=X` | 每日预算上限（USD） |
-| `--budget-monthly=X` | 每月预算上限（USD） |
-| `--budget-warning=X` | 警告阈值（0-1，默认 0.8） |
-| `--no-budget` | 禁用预算检查 |
+| `--no-memory` | 禁用所有 memory 加载 |
+| `--no-auto-memory` | 禁用 auto memory 写入 |
 
 ## 环境变量
 
 | 变量 | 说明 |
 |------|------|
-| `HELM_BUDGET_SESSION` | Session 预算上限 |
-| `HELM_BUDGET_DAILY` | 每日预算上限 |
-| `HELM_BUDGET_MONTHLY` | 每月预算上限 |
-| `HELM_BUDGET_WARNING` | 警告阈值 |
-| `HELM_PRICES_FILE` | 自定义价格文件路径 |
+| `HOME` | 用户级 memory 目录（~/.helm/memory/） |
 
 ## 断点位置
 
 | 文件 | 行号 | 看什么 |
 |------|------|--------|
-| `packages/usage/src/cost.ts` | `calculateCost()` | 成本计算逻辑 |
-| `packages/usage/src/budget.ts` | `checkBudget()` | 预算检查逻辑 |
-| `packages/usage/src/tracker.ts` | `recordTokens()` | Token 记录 |
-| `packages/usage/src/tracker.ts` | `checkBudget()` | 预算状态检查 |
-| `packages/usage/src/tracker.ts` | `formatSessionStatus()` | 格式化输出 |
-| `packages/cli/src/repl.ts` | `const usageTracker` | UsageTracker 创建 |
+| `packages/memory/src/store.ts` | `load()` | Memory 加载逻辑 |
+| `packages/memory/src/store.ts` | `getInstructionText()` | 指令文本组装 |
+| `packages/memory/src/store.ts` | `writeAutoMemory()` | Auto memory 写入 |
+| `packages/memory/src/rules.ts` | `matchGlob()` | Glob 匹配逻辑 |
+| `packages/cli/src/repl.ts` | `const memoryStore` | MemoryStore 创建 |
+| `packages/cli/src/repl.ts` | `memoryStore.load()` | Session 启动加载 |
 
 ## 改动文件
 
 ```
-packages/usage/src/
-├── types.ts          类型定义（TokenUsage, CostBreakdown, BudgetConfig 等）
-├── cost.ts           成本计算（calculateCost, formatCost, formatTokens）
-├── cost.test.ts      10 个测试
-├── prices.ts         价格表（默认价格 + 自定义加载）
-├── prices.test.ts    5 个测试
-├── budget.ts         预算检查（checkBudget, loadBudgetConfig）
-├── budget.test.ts    10 个测试
-├── storage.ts        Usage 存储（JSONL 文件）
-├── storage.test.ts   5 个测试
-├── tracker.ts        UsageTracker 主类
-├── tracker.test.ts   8 个测试
+packages/memory/src/
+├── types.ts          类型定义（MemoryEntry, MemoryRule, MemoryLoadResult 等）
+├── store.ts          MemoryStore 主类（load, write, search, clear, export/import）
+├── store.test.ts     20 个测试
+├── rules.ts          Glob 匹配（matchGlob, matchesGlobs, filterRulesForFile）
+├── rules.test.ts     9 个测试
+├── auto-memory.ts    Auto memory 触发检测
+├── auto-memory.test.ts  6 个测试
 └── index.ts          导出
 
 packages/skill/src/
-└── builtins.ts       新增 /usage 命令
+└── builtins.ts       新增 /memory 命令（list/show/search/clear/export/import）
+
+packages/core/src/
+└── events.ts         新增 memory:load/memory:write/memory:clear 事件
 
 packages/cli/src/
-└── repl.ts           集成 UsageTracker + getUsageStatus
+└── repl.ts           集成 MemoryStore + 加载 memory 到 system prompt
 
 packages/cli/bin/
-└── run.ts            新增 --budget-* flags
+└── run.ts            新增 --no-memory/--no-auto-memory flags
 ```
 
 ## 关键设计决策
 
-1. **按模型定价** — 不同模型不同价格，支持自定义价格表
-2. **缓存折扣** — cached tokens 有折扣（默认 50%）
-3. **预算分层** — session/daily/monthly 三级预算
-4. **警告阈值** — 默认 80% 时警告，不阻止
-5. **超预算处理** — 默认软警告，用户可选择继续
-6. **Usage 存储** — JSONL 按天分割，便于分析
-7. **向后兼容** — 不传 budget flags 时行为与 PR23 完全一致
+1. **Markdown 优先** — 人类可读、可编辑、可版本控制
+2. **YAML frontmatter** — 元数据（type, project, globs）与内容分离
+3. **三级作用域** — user/project/session，按需加载
+4. **Glob 规则** — rules/*.md 按文件路径匹配加载
+5. **大小限制** — 默认 25KB / 200 行，超限警告不阻止
+6. **Session 启动加载** — memory 注入 system prompt，不阻塞启动
+7. **Auto memory** — 可通过 --no-auto-memory 禁用
+8. **向后兼容** — 不创建 memory 文件时行为与 PR24 完全一致

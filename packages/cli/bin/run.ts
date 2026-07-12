@@ -172,6 +172,8 @@ function parseReplArgs(
   budgetMonthly?: number;
   budgetWarning?: number;
   noBudget: boolean;
+  noMemory: boolean;
+  noAutoMemory: boolean;
   mcpServers: Array<{ name: string; command: string; args?: string[]; env?: Record<string, string>; riskLevel?: string }>;
 } {
   // Apply config file first, CLI flags override
@@ -209,6 +211,8 @@ function parseReplArgs(
   let budgetMonthly: number | undefined;
   let budgetWarning: number | undefined;
   let noBudget = false;
+  let noMemory = false;
+  let noAutoMemory = false;
   const mcpServers: Array<{ name: string; command: string; args?: string[]; env?: Record<string, string>; riskLevel?: string }> = [];
 
   if (base.nonInteractive && isNonInteractiveStrategy(base.nonInteractive)) {
@@ -325,6 +329,10 @@ function parseReplArgs(
       budgetWarning = parseFloat(arg.slice("--budget-warning=".length));
     } else if (arg === "--no-budget") {
       noBudget = true;
+    } else if (arg === "--no-memory") {
+      noMemory = true;
+    } else if (arg === "--no-auto-memory") {
+      noAutoMemory = true;
     }
   }
 
@@ -356,6 +364,8 @@ function parseReplArgs(
     budgetMonthly,
     budgetWarning,
     noBudget,
+    noMemory,
+    noAutoMemory,
     mcpServers,
   };
 }
@@ -459,6 +469,8 @@ async function main() {
       budgetMonthly: parsed.budgetMonthly,
       budgetWarning: parsed.budgetWarning,
       noBudget: parsed.noBudget,
+      noMemory: parsed.noMemory,
+      noAutoMemory: parsed.noAutoMemory,
       mcpServers: parsed.mcpServers,
       streamingBus,
     });
