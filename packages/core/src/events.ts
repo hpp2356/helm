@@ -200,6 +200,38 @@ export type RunEvent =
       runId: string;
       scope: "session" | "project" | "all";
       timestamp: number;
+    }
+  | {
+      type: "checkpoint:create";
+      runId: string;
+      checkpointId: string;
+      checkpointType: "file_edit" | "prompt" | "session_start";
+      files: string[];
+      conversationIndex: number;
+      timestamp: number;
+    }
+  | {
+      type: "checkpoint:restore";
+      runId: string;
+      checkpointId: string;
+      action: "code+conversation" | "conversation" | "code" | "summarize_from" | "summarize_up_to";
+      filesRestored: string[];
+      timestamp: number;
+    }
+  | {
+      type: "checkpoint:summarize";
+      runId: string;
+      checkpointId: string;
+      direction: "from_here" | "up_to_here";
+      messageCountBefore: number;
+      messageCountAfter: number;
+      timestamp: number;
+    }
+  | {
+      type: "checkpoint:clean";
+      runId: string;
+      removed: number;
+      timestamp: number;
     };
 
 export function eventToString(event: RunEvent): string {

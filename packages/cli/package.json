@@ -21,7 +21,8 @@
     "@helm/skill": "workspace:*",
     "@helm/telemetry": "workspace:*",
     "@helm/usage": "workspace:*",
-    "@helm/memory": "workspace:*"
+    "@helm/memory": "workspace:*",
+    "@helm/checkpoint": "workspace:*"
   },
   "optionalDependencies": {
     "@helm/provider-deepseek": "workspace:*"

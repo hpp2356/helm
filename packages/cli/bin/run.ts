@@ -167,6 +167,10 @@ function parseReplArgs(
   bypassHookTrust: boolean;
   noTelemetry: boolean;
   telemetryVerbose: boolean;
+  noCheckpoint: boolean;
+  checkpointRetention?: number;
+  checkpointDir?: string;
+  gitCheckpoint: boolean;
   budgetSession?: number;
   budgetDaily?: number;
   budgetMonthly?: number;
@@ -213,6 +217,10 @@ function parseReplArgs(
   let noBudget = false;
   let noMemory = false;
   let noAutoMemory = false;
+  let noCheckpoint = false;
+  let checkpointRetention: number | undefined;
+  let checkpointDir: string | undefined;
+  let gitCheckpoint = false;
   const mcpServers: Array<{ name: string; command: string; args?: string[]; env?: Record<string, string>; riskLevel?: string }> = [];
 
   if (base.nonInteractive && isNonInteractiveStrategy(base.nonInteractive)) {
@@ -333,6 +341,16 @@ function parseReplArgs(
       noMemory = true;
     } else if (arg === "--no-auto-memory") {
       noAutoMemory = true;
+    } else if (arg === "--no-checkpoint") {
+      noCheckpoint = true;
+    } else if (arg.startsWith("--checkpoint-retention=")) {
+      const v = Number(arg.slice("--checkpoint-retention=".length));
+      if (!Number.isInteger(v) || v < 1) process.exit(1);
+      checkpointRetention = v;
+    } else if (arg.startsWith("--checkpoint-dir=")) {
+      checkpointDir = arg.slice("--checkpoint-dir=".length);
+    } else if (arg === "--git-checkpoint") {
+      gitCheckpoint = true;
     }
   }
 
@@ -366,6 +384,10 @@ function parseReplArgs(
     noBudget,
     noMemory,
     noAutoMemory,
+    noCheckpoint,
+    checkpointRetention,
+    checkpointDir,
+    gitCheckpoint,
     mcpServers,
   };
 }
@@ -471,6 +493,10 @@ async function main() {
       noBudget: parsed.noBudget,
       noMemory: parsed.noMemory,
       noAutoMemory: parsed.noAutoMemory,
+      noCheckpoint: parsed.noCheckpoint,
+      checkpointRetention: parsed.checkpointRetention,
+      checkpointDir: parsed.checkpointDir,
+      gitCheckpoint: parsed.gitCheckpoint,
       mcpServers: parsed.mcpServers,
       streamingBus,
     });

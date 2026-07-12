@@ -13,6 +13,7 @@ packages:
   - 'packages/telemetry'
   - 'packages/usage'
   - 'packages/memory'
+  - 'packages/checkpoint'
 allowBuilds:
   esbuild: true
 minimumReleaseAgeExclude:

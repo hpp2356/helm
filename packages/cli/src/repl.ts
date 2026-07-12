@@ -29,6 +29,7 @@ import type { HookEvent } from "@helm/hooks";
 import { TelemetryManager, loadTelemetryConfig } from "@helm/telemetry";
 import { UsageTracker } from "@helm/usage";
 import { MemoryStore } from "@helm/memory";
+import { CheckpointManager } from "@helm/checkpoint";
 import type { Provider, Tool, Message } from "@helm/core";
 import {
   PasteBuffer,
@@ -103,6 +104,14 @@ export interface ReplConfig {
   budgetWarning?: number;
   /** Disable budget checks (--no-budget). */
   noBudget?: boolean;
+  /** Disable checkpoint tracking (--no-checkpoint). */
+  noCheckpoint?: boolean;
+  /** Checkpoint retention days (--checkpoint-retention). */
+  checkpointRetention?: number;
+  /** Checkpoint directory (--checkpoint-dir). */
+  checkpointDir?: string;
+  /** Enable git checkpoint (--git-checkpoint). */
+  gitCheckpoint?: boolean;
   /** Disable memory loading (--no-memory). */
   noMemory?: boolean;
   /** Disable auto-memory writing (--no-auto-memory). */
@@ -537,14 +546,31 @@ export async function startRepl(config: ReplConfig): Promise<void> {
       }
       case "tool:call": {
         const toolName = String(e.toolName ?? "");
+        const args = (e.args as Record<string, unknown>) ?? {};
         // Use runId+toolName as key; if multiple concurrent calls use same tool
         // the last call wins (acceptable approximation for sequential tools).
         const callKey = `${String(e.runId ?? "")}_${toolName}`;
         pendingCalls.set(callKey, {
           name: toolName,
-          args: (e.args as Record<string, unknown>) ?? {},
+          args,
           startMs: Date.now(),
         });
+
+        // Pre-edit snapshot for checkpoint
+        if (toolName === "write" || toolName === "edit") {
+          const filePath = String(args.filePath ?? "");
+          if (filePath) {
+            try {
+              const { readFileSync: rf } = await import("node:fs");
+              const content = rf(resolve(filePath), "utf-8");
+              preEditSnapshots.set(callKey, { files: [resolve(filePath)], content: [content] });
+            } catch {
+              // File may not exist yet (write tool) — snapshot with empty
+              preEditSnapshots.set(callKey, { files: [resolve(filePath)], content: [""] });
+            }
+          }
+        }
+
         statusState.currentTool = toolName;
         paintStatusBar();
         break;
@@ -554,6 +580,32 @@ export async function startRepl(config: ReplConfig): Promise<void> {
         const callKey = `${String(e.runId ?? "")}_${toolName}`;
         const pending = pendingCalls.get(callKey);
         pendingCalls.delete(callKey);
+
+        // Create checkpoint after successful file edit
+        if ((toolName === "write" || toolName === "edit") && !String(e.output ?? "").startsWith("Error:")) {
+          const snapshot = preEditSnapshots.get(callKey);
+          preEditSnapshots.delete(callKey);
+          if (snapshot && snapshot.files.length > 0) {
+            const cp = checkpointMgr.createFromFileEdit(
+              snapshot.files,
+              messageHistory.length,
+              pending?.args ? String((pending.args as Record<string, unknown>).filePath ?? "file edit") : "file edit",
+            );
+            if (cp) {
+              await originalAppend({
+                type: "checkpoint:create",
+                runId,
+                checkpointId: cp.id,
+                checkpointType: "file_edit",
+                files: snapshot.files,
+                conversationIndex: messageHistory.length,
+                timestamp: Date.now(),
+              });
+            }
+          }
+        } else {
+          preEditSnapshots.delete(callKey);
+        }
 
         const raw = String(e.output ?? "");
         const success = !raw.startsWith("Error:");
@@ -632,6 +684,12 @@ export async function startRepl(config: ReplConfig): Promise<void> {
         break;
       case "memory:clear":
         emit(renderSystemNotice(`Memory cleared (scope=${e.scope})`, theme));
+        break;
+      case "checkpoint:create":
+        emit(renderSystemNotice(`Checkpoint ${e.checkpointId} (${e.checkpointType})`, theme));
+        break;
+      case "checkpoint:restore":
+        emit(renderSystemNotice(`Restored to ${e.checkpointId} (${e.action})`, theme));
         break;
     }
     await originalAppend(event);
@@ -970,6 +1028,30 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     }
   }
 
+  // ── Checkpoint Manager ────────────────────────────────────────────────────
+  const checkpointMgr = new CheckpointManager({
+    sessionId: runId,
+    checkpointDir: config.checkpointDir,
+    retentionDays: config.checkpointRetention,
+    enabled: !config.noCheckpoint,
+  });
+
+  // Create session-start checkpoint
+  checkpointMgr.createSessionStart(0);
+  await journal.append({
+    type: "checkpoint:create",
+    runId,
+    checkpointId: "cp-001",
+    checkpointType: "session_start",
+    files: [],
+    conversationIndex: 0,
+    timestamp: Date.now(),
+  });
+
+  // Snapshot buffer: stores file snapshots before tool execution
+  // Keyed by tool call ID, so we can create checkpoint after successful edit
+  const preEditSnapshots = new Map<string, { files: string[]; content: string[] }>();
+
   // ── Session start hook ─────────────────────────────────────────────────────
   try {
     const sessionResult = await hookRuntime.execute("session:start");
@@ -1064,7 +1146,7 @@ export async function startRepl(config: ReplConfig): Promise<void> {
 
   // ── Slash command registry ────────────────────────────────────────────
   // Build command list dynamically from registered skills + direct handlers
-  const DIRECT_COMMANDS = ["/mode", "/theme", "/compact"];
+  const DIRECT_COMMANDS = ["/mode", "/theme", "/compact", "/rewind", "/checkpoint"];
   const COMMANDS = [...DIRECT_COMMANDS, ...skillRegistry.list().map((s: { name: string }) => `/${s.name}`), "/quit", "/q"];
 
   function makeSkillContext() {
@@ -1123,6 +1205,85 @@ export async function startRepl(config: ReplConfig): Promise<void> {
           }
           hr(); reprompt(); return;
         }
+
+        case "/rewind": {
+          const checkpoints = checkpointMgr.list();
+          if (checkpoints.length === 0) {
+            console.log(theme.dim("No checkpoints available."));
+            hr(); reprompt(); return;
+          }
+
+          // Show rewind menu
+          const W = 52;
+          const b = theme.accent;
+          const reset = theme.reset;
+          console.log(`${b}╭─ Rewind ${"─".repeat(W - 10)}╮${reset}`);
+          for (let i = checkpoints.length - 1; i >= 0; i--) {
+            const cp = checkpoints[i]!;
+            const marker = i === checkpoints.length - 1 ? ">" : " ";
+            const id = cp.id.padEnd(12);
+            const desc = cp.description.length > 32 ? cp.description.slice(0, 31) + "…" : cp.description.padEnd(32);
+            const time = new Date(cp.timestamp).toLocaleTimeString();
+            console.log(`${b}│${reset} ${marker} ${theme.bold(id)} ${desc} ${theme.dim(time)} ${b}│${reset}`);
+          }
+          console.log(`${b}╰${"─".repeat(W)}╯${reset}`);
+          console.log("");
+          console.log("Select action:");
+          console.log("  1. Restore code and conversation");
+          console.log("  2. Restore conversation only");
+          console.log("  3. Restore code only");
+          console.log("  4. Summarize from here");
+          console.log("  5. Summarize up to here");
+          console.log("  6. Cancel");
+          console.log("");
+          console.log(theme.dim("Usage: /rewind <checkpoint-id> <1-6>"));
+          hr(); reprompt(); return;
+        }
+
+        case "/checkpoint": {
+          const subcmd = parts[1];
+          if (subcmd === "list" || !subcmd) {
+            const checkpoints = checkpointMgr.list();
+            if (checkpoints.length === 0) {
+              console.log(theme.dim("No checkpoints."));
+            } else {
+              console.log(theme.bold(`Checkpoints (${checkpoints.length}):`));
+              for (const cp of checkpoints) {
+                const time = new Date(cp.timestamp).toLocaleTimeString();
+                console.log(`  ${theme.bold(cp.id)} [${cp.type}] ${cp.description} ${theme.dim(time)} (${cp.fileCount} files)`);
+              }
+            }
+          } else if (subcmd === "restore" && parts[2]) {
+            const cpId = parts[2];
+            const action = (parts[3] ?? "code+conversation") as "code+conversation" | "conversation" | "code";
+            const result = checkpointMgr.restore(cpId, action);
+            if (result) {
+              await journal.append({
+                type: "checkpoint:restore",
+                runId,
+                checkpointId: cpId,
+                action,
+                filesRestored: result.filesRestored,
+                timestamp: Date.now(),
+              });
+              console.log(theme.dim(`Restored ${result.filesRestored.length} files to ${cpId}`));
+            } else {
+              console.log(theme.dim(`Checkpoint "${cpId}" not found.`));
+            }
+          } else if (subcmd === "clean") {
+            const removed = checkpointMgr.clean();
+            await journal.append({
+              type: "checkpoint:clean",
+              runId,
+              removed,
+              timestamp: Date.now(),
+            });
+            console.log(theme.dim(`Cleaned ${removed} expired checkpoint(s).`));
+          } else {
+            console.log("Usage: /checkpoint [list|restore <id> [action]|clean]");
+          }
+          hr(); reprompt(); return;
+        }
       }
 
       // Just "/" — activate interactive menu
@@ -1154,6 +1315,20 @@ export async function startRepl(config: ReplConfig): Promise<void> {
 
     turnCount++;
     sm.send("sending");
+
+    // Create prompt checkpoint
+    const promptCp = checkpointMgr.createFromPrompt(trimmed, messageHistory.length);
+    if (promptCp) {
+      await journal.append({
+        type: "checkpoint:create",
+        runId,
+        checkpointId: promptCp.id,
+        checkpointType: "prompt",
+        files: [],
+        conversationIndex: messageHistory.length,
+        timestamp: Date.now(),
+      });
+    }
     streamedTextThisTurn = false;
     streamingBus?.emit({ type: "turn_start", turnIndex: turnCount });
 

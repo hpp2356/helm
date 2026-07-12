@@ -13,7 +13,8 @@
     { "path": "../plugin" },
     { "path": "../skill" },
     { "path": "../provider-deepseek" },
-    { "path": "../memory" }
+    { "path": "../memory" },
+    { "path": "../checkpoint" }
   ],
   "include": ["bin/**/*.ts", "src/**/*.ts"]
 }
