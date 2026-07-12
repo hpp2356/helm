@@ -35,6 +35,9 @@ importers:
       '@helm/plugin':
         specifier: workspace:*
         version: link:../plugin
+      '@helm/prompt':
+        specifier: workspace:*
+        version: link:../prompt
       '@helm/runtime':
         specifier: workspace:*
         version: link:../runtime
@@ -71,6 +74,8 @@ importers:
       '@helm/core':
         specifier: workspace:*
         version: link:../core
+
+  packages/prompt: {}
 
   packages/provider-deepseek:
     dependencies:
