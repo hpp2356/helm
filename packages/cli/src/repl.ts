@@ -27,6 +27,7 @@ import { PromptBuilder } from "@helm/prompt";
 import { HookRuntime } from "@helm/hooks";
 import type { HookEvent } from "@helm/hooks";
 import { TelemetryManager, loadTelemetryConfig } from "@helm/telemetry";
+import { UsageTracker } from "@helm/usage";
 import type { Provider, Tool, Message } from "@helm/core";
 import {
   PasteBuffer,
@@ -91,6 +92,16 @@ export interface ReplConfig {
   noTelemetry?: boolean;
   /** Verbose telemetry logging (--telemetry-verbose). */
   telemetryVerbose?: boolean;
+  /** Session budget limit in USD (--budget-session). */
+  budgetSession?: number;
+  /** Daily budget limit in USD (--budget-daily). */
+  budgetDaily?: number;
+  /** Monthly budget limit in USD (--budget-monthly). */
+  budgetMonthly?: number;
+  /** Budget warning threshold 0-1 (--budget-warning). */
+  budgetWarning?: number;
+  /** Disable budget checks (--no-budget). */
+  noBudget?: boolean;
   configPath?: string;
   mcpServers?: McpServerFlag[];
   /** StreamingBus for real-time streaming output. Created externally. */
@@ -445,6 +456,10 @@ export async function startRepl(config: ReplConfig): Promise<void> {
       }
       return { rules, bypassTrust: config.bypassHookTrust ?? false, disabled: config.noHooks ?? false };
     },
+    getUsageStatus: () => ({
+      session: usageTracker.formatSessionStatus(),
+      daily: usageTracker.formatDailyStatus(),
+    }),
     clearMessages: () => {
       const count = messageHistory.length;
       messageHistory = SYSTEM_MESSAGE ? [{ ...SYSTEM_MESSAGE }] : [];
@@ -884,6 +899,21 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   const telemetry = new TelemetryManager(telemetryConfig);
   const sessionId = `repl-${Date.now()}`;
   telemetry.startSession(sessionId, config.providerName, config.providerName);
+
+  // ── Usage Tracker ──────────────────────────────────────────────────────────
+  const usageTracker = new UsageTracker(
+    config.providerName,
+    config.providerName,
+    {
+      enabled: !config.noBudget,
+      budgetConfig: {
+        session_limit: config.budgetSession,
+        daily_limit: config.budgetDaily,
+        monthly_limit: config.budgetMonthly,
+        warning_threshold: config.budgetWarning ?? 0.8,
+      },
+    },
+  );
 
   // ── Session start hook ─────────────────────────────────────────────────────
   try {

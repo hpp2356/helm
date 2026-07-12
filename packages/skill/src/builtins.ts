@@ -19,6 +19,8 @@ export interface BuiltinDeps {
   getPlugins: () => Array<{ name: string; version: string; toolCount: number }>;
   /** Get loaded hook config summary. */
   getHooks?: () => { rules: Array<{ event: string; matcher: string; command: string }>; bypassTrust: boolean; disabled: boolean };
+  /** Get usage status (session and daily). */
+  getUsageStatus?: () => { session: string; daily: string };
   /** Clear message history (resets to system message). Returns new count. */
   clearMessages: () => number;
   /** Signal the REPL to close. */
@@ -39,6 +41,7 @@ export function createBuiltinSkills(deps: BuiltinDeps): Skill[] {
     createStatsSkill(deps),
     createPluginsSkill(deps),
     createHooksSkill(deps),
+    createUsageSkill(deps),
   ];
 }
 
@@ -149,6 +152,18 @@ function createHooksSkill(deps: BuiltinDeps): Skill {
         }
       }
       return lines.join("\n");
+    },
+  };
+}
+
+function createUsageSkill(deps: BuiltinDeps): Skill {
+  return {
+    name: "usage",
+    description: "Show token usage and cost statistics",
+    handler: async (_input, _ctx) => {
+      const usage = deps.getUsageStatus?.();
+      if (!usage) return "Usage tracking not available.";
+      return `${usage.session}\n\n${usage.daily}`;
     },
   };
 }
