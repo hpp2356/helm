@@ -167,6 +167,11 @@ function parseReplArgs(
   bypassHookTrust: boolean;
   noTelemetry: boolean;
   telemetryVerbose: boolean;
+  budgetSession?: number;
+  budgetDaily?: number;
+  budgetMonthly?: number;
+  budgetWarning?: number;
+  noBudget: boolean;
   mcpServers: Array<{ name: string; command: string; args?: string[]; env?: Record<string, string>; riskLevel?: string }>;
 } {
   // Apply config file first, CLI flags override
@@ -199,6 +204,11 @@ function parseReplArgs(
   let bypassHookTrust = false;
   let noTelemetry = false;
   let telemetryVerbose = false;
+  let budgetSession: number | undefined;
+  let budgetDaily: number | undefined;
+  let budgetMonthly: number | undefined;
+  let budgetWarning: number | undefined;
+  let noBudget = false;
   const mcpServers: Array<{ name: string; command: string; args?: string[]; env?: Record<string, string>; riskLevel?: string }> = [];
 
   if (base.nonInteractive && isNonInteractiveStrategy(base.nonInteractive)) {
@@ -305,6 +315,16 @@ function parseReplArgs(
       noTelemetry = true;
     } else if (arg === "--telemetry-verbose") {
       telemetryVerbose = true;
+    } else if (arg.startsWith("--budget-session=")) {
+      budgetSession = parseFloat(arg.slice("--budget-session=".length));
+    } else if (arg.startsWith("--budget-daily=")) {
+      budgetDaily = parseFloat(arg.slice("--budget-daily=".length));
+    } else if (arg.startsWith("--budget-monthly=")) {
+      budgetMonthly = parseFloat(arg.slice("--budget-monthly=".length));
+    } else if (arg.startsWith("--budget-warning=")) {
+      budgetWarning = parseFloat(arg.slice("--budget-warning=".length));
+    } else if (arg === "--no-budget") {
+      noBudget = true;
     }
   }
 
@@ -331,6 +351,11 @@ function parseReplArgs(
     bypassHookTrust,
     noTelemetry,
     telemetryVerbose,
+    budgetSession,
+    budgetDaily,
+    budgetMonthly,
+    budgetWarning,
+    noBudget,
     mcpServers,
   };
 }
@@ -429,6 +454,11 @@ async function main() {
       bypassHookTrust: parsed.bypassHookTrust,
       noTelemetry: parsed.noTelemetry,
       telemetryVerbose: parsed.telemetryVerbose,
+      budgetSession: parsed.budgetSession,
+      budgetDaily: parsed.budgetDaily,
+      budgetMonthly: parsed.budgetMonthly,
+      budgetWarning: parsed.budgetWarning,
+      noBudget: parsed.noBudget,
       mcpServers: parsed.mcpServers,
       streamingBus,
     });

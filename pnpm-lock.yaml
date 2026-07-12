@@ -50,6 +50,9 @@ importers:
       '@helm/telemetry':
         specifier: workspace:*
         version: link:../telemetry
+      '@helm/usage':
+        specifier: workspace:*
+        version: link:../usage
     optionalDependencies:
       '@helm/provider-deepseek':
         specifier: workspace:*
@@ -120,6 +123,8 @@ importers:
         version: link:../core
 
   packages/telemetry: {}
+
+  packages/usage: {}
 
 packages:
 

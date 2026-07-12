@@ -1,212 +1,243 @@
-# Helm 手动走查 (PR23)
+# Helm 手动走查 (PR24)
 
 ## 跑命令
 
 ```bash
 cd ~/projects-ai/helm/helm-dev
 pnpm install && pnpm build
-pnpm test                           # 全部测试
-pnpm -C packages/telemetry test     # 只看 telemetry 测试（78 个）
+pnpm test                       # 全部测试
+pnpm -C packages/usage test     # 只看 usage 测试（76 个）
+pnpm repl                       # 启动 REPL
 ```
 
-## 场景 1：Console 导出 — 看 stderr 输出的 metrics
+## 场景 1：实时成本 — 看 session 中的成本变化
 
 **命令**：
 
 ```bash
-HELM_TELEMETRY_ENABLED=1 HELM_METRICS_EXPORTER=console HELM_LOGS_EXPORTER=console pnpm repl --provider=scripted
-> Hello
-> /exit
+pnpm repl --provider=deepseek
+> Hello, how are you?
+> /usage
 ```
 
 **预期行为**：
 
-- stderr 输出 metrics 和 logs
-- 输出格式：`[telemetry] metric helm.session.count=1`
-- 输出格式：`[telemetry] info [session:start] — Session repl-xxx started`
+- `/usage` 显示当前 session 的 token 使用和成本
+- 格式化显示 input/output tokens 和总成本
 
-**stderr 输出示例**：
+**输出示例**：
 
 ```
-[telemetry] metric helm.session.count=1 {"model":"scripted","provider":"scripted"}
-[telemetry] info [session:start] — Session repl-1234 started
-[telemetry] info [session:end] — Session repl-1234 ended
-[telemetry] metric helm.session.duration=5234
+╭─ Session Usage ─────────────────────────────╮
+│ Model:         deepseek-chat                │
+│ Input tokens:           150 (cached:        0) │
+│ Output tokens:                           42 │
+│ Total cost:    $0.000063                    │
+│ Duration:      5s                           │
+╰──────────────────────────────────────────────╯
+
+╭─ Daily Usage ───────────────────────────────╮
+│ Sessions:                                  1 │
+│ Total cost:  $0.0001                        │
+│ Budget:      No limit                       │
+╰──────────────────────────────────────────────╯
 ```
 
-## 场景 2：File 导出 — 检查 ~/.helm/telemetry/ 文件
+## 场景 2：/usage 命令 — 看 token 和成本统计
 
 **命令**：
 
 ```bash
-HELM_TELEMETRY_ENABLED=1 pnpm repl --provider=scripted
-> Hello
-> /exit
-ls -la ~/.helm/telemetry/
-cat ~/.helm/telemetry/metrics-*.jsonl
-cat ~/.helm/telemetry/logs-*.jsonl
-cat ~/.helm/telemetry/usage.jsonl
+pnpm repl --provider=deepseek
+> What is 2+2?
+> What is the capital of France?
+> /usage
 ```
 
 **预期行为**：
 
-- `~/.helm/telemetry/` 目录自动创建
-- `metrics-YYYY-MM-DD.jsonl` 包含 metrics 数据
-- `logs-YYYY-MM-DD.jsonl` 包含 logs 数据
-- `usage.jsonl` 包含会话汇总
+- 显示累积的 token 使用量
+- 显示总成本
+- 显示 session 时长
 
-**usage.jsonl 示例**：
+## 场景 3：Budget 设置 — 设置 session 预算
+
+**命令**：
+
+```bash
+pnpm repl --provider=deepseek --budget-session=0.01
+> Hello
+> /usage
+```
+
+**预期行为**：
+
+- 设置 session 预算为 $0.01
+- `/usage` 显示预算使用百分比
+
+## 场景 4：Budget 警告 — 达到阈值时的警告
+
+**命令**：
+
+```bash
+pnpm repl --provider=deepseek --budget-session=0.001 --budget-warning=0.5
+> [发送多条消息直到接近预算]
+```
+
+**预期行为**：
+
+- 当成本达到预算的 50% 时显示警告
+- 警告格式：`Session budget warning: $X / $Y (Z%)`
+
+## 场景 5：超预算处理 — 超出预算时的行为
+
+**命令**：
+
+```bash
+pnpm repl --provider=deepseek --budget-session=0.0001
+> [发送消息直到超预算]
+```
+
+**预期行为**：
+
+- 超出预算时显示错误消息
+- 格式：`Session budget exceeded: $X / $Y (Z%)`
+- 用户可选择继续或停止
+
+## 场景 6：自定义价格 — 修改价格表
+
+**创建自定义价格文件**：
+
+```bash
+cat > ~/.helm/prices.json << 'EOF'
+{
+  "deepseek": {
+    "deepseek-chat": {
+      "input": 0.20,
+      "cached": 0.10,
+      "output": 0.40
+    }
+  }
+}
+EOF
+```
+
+**命令**：
+
+```bash
+pnpm repl --provider=deepseek
+> Hello
+> /usage
+```
+
+**预期行为**：
+
+- 使用自定义价格计算成本
+- 成本应高于默认价格
+
+## 场景 7：Usage 文件 — 检查 ~/.helm/usage/
+
+**命令**：
+
+```bash
+ls -la ~/.helm/usage/
+cat ~/.helm/usage/2026-07-12.jsonl
+```
+
+**预期行为**：
+
+- 每天一个 JSONL 文件
+- 每条记录包含 session_id, tokens, cost, duration
+
+**JSONL 格式**：
 
 ```json
-{"session_id":"repl-1234","start_time":"2026-07-12T10:00:00Z","end_time":"2026-07-12T10:00:05Z","token_input":0,"token_output":0,"tool_calls":0,"tool_errors":0,"api_requests":0,"hook_executions":0}
-```
-
-## 场景 3：Token 统计 — 看 token 使用量
-
-**命令**：
-
-```bash
-HELM_TELEMETRY_ENABLED=1 pnpm repl --provider=deepseek
-> Tell me a joke
-> /exit
-cat ~/.helm/telemetry/usage.jsonl | jq '.token_input, .token_output'
-```
-
-**预期行为**：
-
-- `token_input` 记录输入 token 数
-- `token_output` 记录输出 token 数
-- metrics 文件包含 `helm.api.token.input` 和 `helm.api.token.output`
-
-## 场景 4：工具调用统计 — 看工具调用次数和延迟
-
-**命令**：
-
-```bash
-HELM_TELEMETRY_ENABLED=1 pnpm repl --provider=deepseek
-> Read the file package.json
-> /exit
-cat ~/.helm/telemetry/usage.jsonl | jq '.tool_calls, .tool_errors'
-cat ~/.helm/telemetry/metrics-*.jsonl | grep "tool.call"
-```
-
-**预期行为**：
-
-- `tool_calls` 记录工具调用次数
-- `tool_errors` 记录工具调用错误数
-- metrics 包含 `helm.tool.call.duration` 带延迟数据
-
-## 场景 5：会话汇总 — 看 usage.jsonl 内容
-
-**命令**：
-
-```bash
-HELM_TELEMETRY_ENABLED=1 pnpm repl --provider=deepseek
-> Hello
-> /exit
-cat ~/.helm/telemetry/usage.jsonl | jq .
-```
-
-**预期字段**：
-
-| 字段 | 说明 |
-|------|------|
-| `session_id` | 会话 ID |
-| `start_time` | 开始时间 |
-| `end_time` | 结束时间 |
-| `token_input` | 输入 token 总数 |
-| `token_output` | 输出 token 总数 |
-| `tool_calls` | 工具调用次数 |
-| `tool_errors` | 工具调用错误数 |
-| `api_requests` | API 请求次数 |
-| `hook_executions` | Hook 执行次数 |
-
-## 场景 6：隐私控制 — 验证 prompt 不被记录
-
-**命令**：
-
-```bash
-# 默认不记录 prompt
-HELM_TELEMETRY_ENABLED=1 HELM_LOGS_EXPORTER=file pnpm repl --provider=deepseek
-> Tell me a secret: my password is 12345
-> /exit
-cat ~/.helm/telemetry/logs-*.jsonl | grep -i "password"
-```
-
-**预期行为**：
-
-- 默认 `HELM_LOG_USER_PROMPTS=0` — prompt 内容不出现在 logs
-- 默认 `HELM_LOG_TOOL_CONTENT=0` — 工具输出内容不出现在 logs
-- grep 无结果
-
-**启用 prompt 记录**：
-
-```bash
-HELM_TELEMETRY_ENABLED=1 HELM_LOG_USER_PROMPTS=1 pnpm repl
-# 现在 prompt 内容会出现在 logs
+{
+  "session_id": "session-1234567890",
+  "timestamp": "2026-07-12T10:30:00.000Z",
+  "model": "deepseek-chat",
+  "provider": "deepseek",
+  "tokens": {
+    "input_tokens": 150,
+    "cached_tokens": 0,
+    "output_tokens": 42,
+    "reasoning_tokens": 0
+  },
+  "cost": {
+    "input_cost": 0.000021,
+    "cached_cost": 0,
+    "output_cost": 0.000012,
+    "reasoning_cost": 0,
+    "total_cost": 0.000033
+  },
+  "duration_ms": 5000
+}
 ```
 
 ## CLI Flags
 
-| Flag | 环境变量 | 说明 |
-|------|----------|------|
-| `--no-telemetry` | `HELM_TELEMETRY_ENABLED=0` | 禁用 telemetry |
-| `--telemetry-verbose` | `HELM_TELEMETRY_VERBOSE=1` | 详细日志（debug 级别） |
-| — | `HELM_METRICS_EXPORTER=console` | Metrics 导出器 |
-| — | `HELM_LOGS_EXPORTER=file` | Logs 导出器 |
-| — | `HELM_TRACES_EXPORTER=none` | Traces 导出器 |
-| — | `HELM_LOG_USER_PROMPTS=1` | 记录 prompt 内容 |
-| — | `HELM_LOG_TOOL_CONTENT=1` | 记录工具输出内容 |
+| Flag | 说明 |
+|------|------|
+| `--budget-session=X` | Session 预算上限（USD） |
+| `--budget-daily=X` | 每日预算上限（USD） |
+| `--budget-monthly=X` | 每月预算上限（USD） |
+| `--budget-warning=X` | 警告阈值（0-1，默认 0.8） |
+| `--no-budget` | 禁用预算检查 |
 
-## IDEA 断点位置
+## 环境变量
+
+| 变量 | 说明 |
+|------|------|
+| `HELM_BUDGET_SESSION` | Session 预算上限 |
+| `HELM_BUDGET_DAILY` | 每日预算上限 |
+| `HELM_BUDGET_MONTHLY` | 每月预算上限 |
+| `HELM_BUDGET_WARNING` | 警告阈值 |
+| `HELM_PRICES_FILE` | 自定义价格文件路径 |
+
+## 断点位置
 
 | 文件 | 行号 | 看什么 |
 |------|------|--------|
-| `packages/telemetry/src/telemetry.ts` | `startSession()` | 会话开始 metrics |
-| `packages/telemetry/src/telemetry.ts` | `recordApiRequest()` | API 请求 metrics |
-| `packages/telemetry/src/telemetry.ts` | `recordToolCall()` | 工具调用 metrics |
-| `packages/telemetry/src/telemetry.ts` | `flush()` | 导出触发 |
-| `packages/telemetry/src/telemetry.ts` | `exportUsage()` | usage.jsonl 写入 |
-| `packages/telemetry/src/exporters/file.ts` | `exportMetrics()` | 文件写入 |
+| `packages/usage/src/cost.ts` | `calculateCost()` | 成本计算逻辑 |
+| `packages/usage/src/budget.ts` | `checkBudget()` | 预算检查逻辑 |
+| `packages/usage/src/tracker.ts` | `recordTokens()` | Token 记录 |
+| `packages/usage/src/tracker.ts` | `checkBudget()` | 预算状态检查 |
+| `packages/usage/src/tracker.ts` | `formatSessionStatus()` | 格式化输出 |
+| `packages/cli/src/repl.ts` | `const usageTracker` | UsageTracker 创建 |
 
 ## 改动文件
 
 ```
-packages/telemetry/src/
-├── types.ts                    类型定义（MetricEntry, LogEntry, SpanEntry, UsageEntry）
-├── config.ts                   环境变量配置加载
-├── config.test.ts              5 个测试
-├── metrics.ts                  MetricsCollector（counter, histogram）
-├── metrics.test.ts             5 个测试
-├── logs.ts                     LogsCollector（debug/info/warn/error）
-├── logs.test.ts                5 个测试
-├── traces.ts                   TracesCollector（span 生命周期）
-├── traces.test.ts              5 个测试
-├── telemetry.ts                TelemetryManager 主类
-├── telemetry.test.ts           8 个测试
-├── exporters/
-│   ├── console.ts              ConsoleExporter（stderr）
-│   ├── console.test.ts         4 个测试
-│   ├── file.ts                 FileExporter（JSONL 文件）
-│   ├── file.test.ts            5 个测试
-│   └── noop.ts                 NoopExporter
-└── index.ts                    导出
+packages/usage/src/
+├── types.ts          类型定义（TokenUsage, CostBreakdown, BudgetConfig 等）
+├── cost.ts           成本计算（calculateCost, formatCost, formatTokens）
+├── cost.test.ts      10 个测试
+├── prices.ts         价格表（默认价格 + 自定义加载）
+├── prices.test.ts    5 个测试
+├── budget.ts         预算检查（checkBudget, loadBudgetConfig）
+├── budget.test.ts    10 个测试
+├── storage.ts        Usage 存储（JSONL 文件）
+├── storage.test.ts   5 个测试
+├── tracker.ts        UsageTracker 主类
+├── tracker.test.ts   8 个测试
+└── index.ts          导出
 
-packages/cli/
-├── bin/run.ts                  新增 --no-telemetry, --telemetry-verbose flags
-├── src/repl.ts                 TelemetryManager 集成
-└── package.json                新增 @helm/telemetry 依赖
+packages/skill/src/
+└── builtins.ts       新增 /usage 命令
 
-pnpm-workspace.yaml             新增 packages/telemetry
+packages/cli/src/
+└── repl.ts           集成 UsageTracker + getUsageStatus
+
+packages/cli/bin/
+└── run.ts            新增 --budget-* flags
 ```
 
 ## 关键设计决策
 
-1. **手写轻量实现** — 不引入 OTel SDK，自己实现 metrics/logs/traces 收集
-2. **环境变量配置** — `HELM_*` 环境变量控制行为，兼容 12-factor app
-3. **分层导出器** — console/file/noop 三种导出器，可独立配置
-4. **隐私优先** — 默认不记录 prompt 和工具输出
-5. **非阻塞** — telemetry 操作不阻塞 AgentLoop 执行
-6. **容错** — 导出失败不影响 Helm 运行
-7. **文件格式** — JSONL 按天分割，usage.jsonl 汇总会话数据
-8. **向后兼容** — 不传 telemetry flags 时行为与 PR22 完全一致
+1. **按模型定价** — 不同模型不同价格，支持自定义价格表
+2. **缓存折扣** — cached tokens 有折扣（默认 50%）
+3. **预算分层** — session/daily/monthly 三级预算
+4. **警告阈值** — 默认 80% 时警告，不阻止
+5. **超预算处理** — 默认软警告，用户可选择继续
+6. **Usage 存储** — JSONL 按天分割，便于分析
+7. **向后兼容** — 不传 budget flags 时行为与 PR23 完全一致
