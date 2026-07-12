@@ -35,6 +35,9 @@ importers:
       '@helm/mcp':
         specifier: workspace:*
         version: link:../mcp
+      '@helm/memory':
+        specifier: workspace:*
+        version: link:../memory
       '@helm/plugin':
         specifier: workspace:*
         version: link:../plugin
@@ -80,6 +83,12 @@ importers:
         specifier: ^1.29.0
         version: 1.29.0(zod@4.4.3)
 
+  packages/memory:
+    dependencies:
+      '@helm/core':
+        specifier: workspace:*
+        version: link:../core
+
   packages/plugin:
     dependencies:
       '@helm/core':
@@ -121,6 +130,9 @@ importers:
       '@helm/core':
         specifier: workspace:*
         version: link:../core
+      '@helm/memory':
+        specifier: workspace:*
+        version: link:../memory
 
   packages/telemetry: {}
 

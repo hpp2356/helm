@@ -12,7 +12,8 @@
     { "path": "../mcp" },
     { "path": "../plugin" },
     { "path": "../skill" },
-    { "path": "../provider-deepseek" }
+    { "path": "../provider-deepseek" },
+    { "path": "../memory" }
   ],
   "include": ["bin/**/*.ts", "src/**/*.ts"]
 }

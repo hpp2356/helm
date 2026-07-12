@@ -1,5 +1,5 @@
 {
-  "name": "@helm/skill",
+  "name": "@helm/memory",
   "version": "0.0.0",
   "type": "module",
   "exports": {
@@ -14,7 +14,6 @@
     "build": "tsc --build"
   },
   "dependencies": {
-    "@helm/core": "workspace:*",
-    "@helm/memory": "workspace:*"
+    "@helm/core": "workspace:*"
   }
 }

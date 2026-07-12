@@ -179,6 +179,27 @@ export type RunEvent =
       error: string;
       durationMs: number;
       timestamp: number;
+    }
+  | {
+      type: "memory:load";
+      runId: string;
+      source: string;
+      scope: "user" | "project";
+      lines: number;
+      timestamp: number;
+    }
+  | {
+      type: "memory:write";
+      runId: string;
+      memoryType: "auto" | "instruction";
+      trigger?: string;
+      timestamp: number;
+    }
+  | {
+      type: "memory:clear";
+      runId: string;
+      scope: "session" | "project" | "all";
+      timestamp: number;
     };
 
 export function eventToString(event: RunEvent): string {
