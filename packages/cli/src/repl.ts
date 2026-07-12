@@ -24,6 +24,8 @@ import { McpRegistry } from "@helm/mcp";
 import { PluginLoader } from "@helm/plugin";
 import { SkillRegistry, createBuiltinSkills, loadUserSkills, parseSkillInput } from "@helm/skill";
 import { PromptBuilder } from "@helm/prompt";
+import { HookRuntime } from "@helm/hooks";
+import type { HookEvent } from "@helm/hooks";
 import type { Provider, Tool, Message } from "@helm/core";
 import {
   PasteBuffer,
@@ -78,6 +80,12 @@ export interface ReplConfig {
   outputStyle?: string;
   /** Text to append to the default prompt (--append-prompt). */
   appendPrompt?: string;
+  /** Disable all hooks (--no-hooks). */
+  noHooks?: boolean;
+  /** Disable specific hook events (--disable-hook=pre:tool). */
+  disableHook?: string[];
+  /** Bypass hook trust checks (--dangerously-bypass-hook-trust). */
+  bypassHookTrust?: boolean;
   configPath?: string;
   mcpServers?: McpServerFlag[];
   /** StreamingBus for real-time streaming output. Created externally. */
@@ -836,6 +844,16 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     });
   }
 
+  // ── Hook runtime ───────────────────────────────────────────────────────────
+  const hookRuntime = new HookRuntime({
+    projectRoot: process.cwd(),
+    sessionId: `repl_${Date.now()}`,
+    cwd: process.cwd(),
+    bypassTrust: config.bypassHookTrust ?? false,
+    disabledEvents: new Set((config.disableHook ?? []) as HookEvent[]),
+    disabled: config.noHooks ?? false,
+  });
+
   // ── Welcome box ───────────────────────────────────────────────────────
   const home = process.env.HOME ?? "";
   const tilde = (p: string): string => home && p.startsWith(home) ? "~" + p.slice(home.length) : p;
@@ -1001,6 +1019,7 @@ export async function startRepl(config: ReplConfig): Promise<void> {
         maxTurns: config.maxTurns ?? 10,
         signal: turnController.signal,
         tokenBudget, contextBuilder, compaction,
+        hookRuntime,
       });
 
       const result = await loop.run(`${runId}-t${turnCount}`, trimmed, messageHistory);

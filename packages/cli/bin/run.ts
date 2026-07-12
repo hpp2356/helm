@@ -162,6 +162,9 @@ function parseReplArgs(
   promptVars: Record<string, string>;
   outputStyle?: string;
   appendPrompt?: string;
+  noHooks: boolean;
+  disableHook: string[];
+  bypassHookTrust: boolean;
   mcpServers: Array<{ name: string; command: string; args?: string[]; env?: Record<string, string>; riskLevel?: string }>;
 } {
   // Apply config file first, CLI flags override
@@ -189,6 +192,9 @@ function parseReplArgs(
   const promptVars: Record<string, string> = {};
   let outputStyle: string | undefined;
   let appendPrompt: string | undefined;
+  let noHooks = false;
+  const disableHook: string[] = [];
+  let bypassHookTrust = false;
   const mcpServers: Array<{ name: string; command: string; args?: string[]; env?: Record<string, string>; riskLevel?: string }> = [];
 
   if (base.nonInteractive && isNonInteractiveStrategy(base.nonInteractive)) {
@@ -285,6 +291,12 @@ function parseReplArgs(
       outputStyle = arg.slice("--output-style=".length);
     } else if (arg.startsWith("--append-prompt=")) {
       appendPrompt = arg.slice("--append-prompt=".length);
+    } else if (arg === "--no-hooks") {
+      noHooks = true;
+    } else if (arg.startsWith("--disable-hook=")) {
+      disableHook.push(arg.slice("--disable-hook=".length));
+    } else if (arg === "--dangerously-bypass-hook-trust") {
+      bypassHookTrust = true;
     }
   }
 
@@ -306,6 +318,9 @@ function parseReplArgs(
     promptVars,
     outputStyle,
     appendPrompt,
+    noHooks,
+    disableHook,
+    bypassHookTrust,
     mcpServers,
   };
 }
@@ -399,6 +414,9 @@ async function main() {
       promptVars: parsed.promptVars,
       outputStyle: parsed.outputStyle,
       appendPrompt: parsed.appendPrompt,
+      noHooks: parsed.noHooks,
+      disableHook: parsed.disableHook,
+      bypassHookTrust: parsed.bypassHookTrust,
       mcpServers: parsed.mcpServers,
       streamingBus,
     });

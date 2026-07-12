@@ -150,6 +150,35 @@ export type RunEvent =
       skillName: string;
       message: string;
       timestamp: number;
+    }
+  | {
+      type: "hook:execute";
+      runId: string;
+      turnIndex: number;
+      hookEvent: string;
+      toolName?: string;
+      status: "success" | "error" | "timeout";
+      durationMs: number;
+      timestamp: number;
+    }
+  | {
+      type: "hook:deny";
+      runId: string;
+      turnIndex: number;
+      hookEvent: string;
+      toolName?: string;
+      reason: string;
+      timestamp: number;
+    }
+  | {
+      type: "hook:error";
+      runId: string;
+      turnIndex: number;
+      hookEvent: string;
+      toolName?: string;
+      error: string;
+      durationMs: number;
+      timestamp: number;
     };
 
 export function eventToString(event: RunEvent): string {
