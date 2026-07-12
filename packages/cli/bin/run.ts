@@ -165,6 +165,8 @@ function parseReplArgs(
   noHooks: boolean;
   disableHook: string[];
   bypassHookTrust: boolean;
+  noTelemetry: boolean;
+  telemetryVerbose: boolean;
   mcpServers: Array<{ name: string; command: string; args?: string[]; env?: Record<string, string>; riskLevel?: string }>;
 } {
   // Apply config file first, CLI flags override
@@ -195,6 +197,8 @@ function parseReplArgs(
   let noHooks = false;
   const disableHook: string[] = [];
   let bypassHookTrust = false;
+  let noTelemetry = false;
+  let telemetryVerbose = false;
   const mcpServers: Array<{ name: string; command: string; args?: string[]; env?: Record<string, string>; riskLevel?: string }> = [];
 
   if (base.nonInteractive && isNonInteractiveStrategy(base.nonInteractive)) {
@@ -297,6 +301,10 @@ function parseReplArgs(
       disableHook.push(arg.slice("--disable-hook=".length));
     } else if (arg === "--dangerously-bypass-hook-trust") {
       bypassHookTrust = true;
+    } else if (arg === "--no-telemetry") {
+      noTelemetry = true;
+    } else if (arg === "--telemetry-verbose") {
+      telemetryVerbose = true;
     }
   }
 
@@ -321,6 +329,8 @@ function parseReplArgs(
     noHooks,
     disableHook,
     bypassHookTrust,
+    noTelemetry,
+    telemetryVerbose,
     mcpServers,
   };
 }
@@ -417,6 +427,8 @@ async function main() {
       noHooks: parsed.noHooks,
       disableHook: parsed.disableHook,
       bypassHookTrust: parsed.bypassHookTrust,
+      noTelemetry: parsed.noTelemetry,
+      telemetryVerbose: parsed.telemetryVerbose,
       mcpServers: parsed.mcpServers,
       streamingBus,
     });
