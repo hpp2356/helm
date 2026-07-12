@@ -9,6 +9,7 @@ packages:
   - 'packages/plugin'
   - 'packages/skill'
   - 'packages/prompt'
+  - 'packages/hooks'
 allowBuilds:
   esbuild: true
 minimumReleaseAgeExclude:

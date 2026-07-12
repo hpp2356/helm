@@ -17,6 +17,8 @@ export interface BuiltinDeps {
   journalPath: string;
   /** Get loaded plugin info. */
   getPlugins: () => Array<{ name: string; version: string; toolCount: number }>;
+  /** Get loaded hook config summary. */
+  getHooks?: () => { rules: Array<{ event: string; matcher: string; command: string }>; bypassTrust: boolean; disabled: boolean };
   /** Clear message history (resets to system message). Returns new count. */
   clearMessages: () => number;
   /** Signal the REPL to close. */
@@ -36,6 +38,7 @@ export function createBuiltinSkills(deps: BuiltinDeps): Skill[] {
     createExitSkill(deps),
     createStatsSkill(deps),
     createPluginsSkill(deps),
+    createHooksSkill(deps),
   ];
 }
 
@@ -124,6 +127,28 @@ function createPluginsSkill(deps: BuiltinDeps): Skill {
       const plugins = deps.getPlugins();
       if (plugins.length === 0) return "No plugins loaded.";
       return `Plugins (${plugins.length}):\n${plugins.map((p) => `  • ${p.name} v${p.version} (${p.toolCount} tools)`).join("\n")}`;
+    },
+  };
+}
+
+function createHooksSkill(deps: BuiltinDeps): Skill {
+  return {
+    name: "hooks",
+    description: "List loaded hooks",
+    handler: async (_input, _ctx) => {
+      const hooks = deps.getHooks?.();
+      if (!hooks) return "Hooks: not available.";
+      if (hooks.disabled) return "Hooks: disabled (--no-hooks).";
+
+      const lines = [`Hooks (trust bypass: ${hooks.bypassTrust ? "yes" : "no"}):`];
+      if (hooks.rules.length === 0) {
+        lines.push("  No hooks configured.");
+      } else {
+        for (const rule of hooks.rules) {
+          lines.push(`  ${rule.event}  matcher=${rule.matcher || "*"}  → ${rule.command}`);
+        }
+      }
+      return lines.join("\n");
     },
   };
 }

@@ -10,6 +10,31 @@ import { ContextBuilder, toToolDefs } from "./context-builder.js";
 import { CharTokenCounter } from "./token-counter.js";
 import { type Compaction } from "./compaction.js";
 
+/** Minimal hook runtime interface (avoids hard dependency on @helm/hooks). */
+export interface HookRuntimeLike {
+  execute(
+    event: string,
+    context: {
+      toolName?: string;
+      toolInput?: Record<string, unknown>;
+      toolOutput?: string;
+      error?: string;
+    },
+  ): Promise<{
+    decision: string;
+    reason?: string;
+    modifiedInput?: Record<string, unknown>;
+    systemMessages: string[];
+    results: Array<{
+      decision: string;
+      reason?: string;
+      error?: string;
+      timedOut?: boolean;
+      durationMs: number;
+    }>;
+  } | null>;
+}
+
 export interface AgentLoopOptions {
   maxTurns: number;
   /** Optional external AbortSignal — caller can cancel a run mid-flight. */
@@ -45,6 +70,11 @@ export interface AgentLoopOptions {
    * When set, the run:start event includes it for run tree reconstruction.
    */
   parentRunId?: string | null;
+  /**
+   * Hook runtime for lifecycle hooks (pre:tool, post:tool, etc.).
+   * When omitted, no hooks are executed (backward-compatible).
+   */
+  hookRuntime?: HookRuntimeLike;
 }
 
 export interface AgentLoopResult {
@@ -377,10 +407,78 @@ export class AgentLoop {
               timestamp: Date.now(),
             });
 
+            // ── pre:tool hook ──────────────────────────────────────────
+            let currentArgs = tc.args;
+            if (this.options.hookRuntime) {
+              const hookResult = await this.options.hookRuntime.execute("pre:tool", {
+                toolName: tc.name,
+                toolInput: currentArgs,
+              });
+
+              if (hookResult) {
+                // Journal hook execution
+                for (const hr of hookResult.results) {
+                  if (hr.error) {
+                    await this.journal.append({
+                      type: "hook:error",
+                      runId,
+                      turnIndex,
+                      hookEvent: "pre:tool",
+                      toolName: tc.name,
+                      error: hr.error,
+                      durationMs: hr.durationMs,
+                      timestamp: Date.now(),
+                    });
+                  } else {
+                    await this.journal.append({
+                      type: "hook:execute",
+                      runId,
+                      turnIndex,
+                      hookEvent: "pre:tool",
+                      toolName: tc.name,
+                      status: hr.timedOut ? "timeout" : "success",
+                      durationMs: hr.durationMs,
+                      timestamp: Date.now(),
+                    });
+                  }
+                }
+
+                // Handle deny
+                if (hookResult.decision === "deny") {
+                  await this.journal.append({
+                    type: "hook:deny",
+                    runId,
+                    turnIndex,
+                    hookEvent: "pre:tool",
+                    toolName: tc.name,
+                    reason: hookResult.reason ?? "Hook denied",
+                    timestamp: Date.now(),
+                  });
+
+                  const denyOutput = `Error: hook denied — ${hookResult.reason ?? "blocked by pre:tool hook"}`;
+                  await this.journal.append({
+                    type: "tool:result",
+                    runId,
+                    turnIndex,
+                    toolName: tc.name,
+                    output: denyOutput,
+                    timestamp: Date.now(),
+                  });
+                  messages.push({ role: "tool", content: denyOutput, toolCallId: tc.id });
+                  continue;
+                }
+
+                // Handle modify
+                if (hookResult.decision === "modify" && hookResult.modifiedInput) {
+                  currentArgs = hookResult.modifiedInput;
+                }
+              }
+            }
+
             // Permission check (if PermissionRuntime configured)
             const permDecision = this.toolRuntime.checkPermission(
               tc.name,
-              tc.args,
+              currentArgs,
             );
 
             let output: string;
@@ -427,7 +525,7 @@ export class AgentLoop {
             try {
               output = await this.toolRuntime.execute(
                 tc.name,
-                tc.args,
+                currentArgs,
                 controller.signal,
               );
             } catch (err) {
@@ -439,6 +537,48 @@ export class AgentLoop {
                 err instanceof Error
                   ? `Error: ${err.message}`
                   : `Error: ${String(err)}`;
+            }
+
+            // ── post:tool hook ─────────────────────────────────────────
+            if (this.options.hookRuntime) {
+              const hookResult = await this.options.hookRuntime.execute("post:tool", {
+                toolName: tc.name,
+                toolInput: currentArgs,
+                toolOutput: output,
+              });
+
+              if (hookResult) {
+                for (const hr of hookResult.results) {
+                  if (hr.error) {
+                    await this.journal.append({
+                      type: "hook:error",
+                      runId,
+                      turnIndex,
+                      hookEvent: "post:tool",
+                      toolName: tc.name,
+                      error: hr.error,
+                      durationMs: hr.durationMs,
+                      timestamp: Date.now(),
+                    });
+                  } else {
+                    await this.journal.append({
+                      type: "hook:execute",
+                      runId,
+                      turnIndex,
+                      hookEvent: "post:tool",
+                      toolName: tc.name,
+                      status: hr.timedOut ? "timeout" : "success",
+                      durationMs: hr.durationMs,
+                      timestamp: Date.now(),
+                    });
+                  }
+                }
+
+                // post:tool deny doesn't block the result, but can inject messages
+                if (hookResult.systemMessages.length > 0) {
+                  output += "\n\n" + hookResult.systemMessages.join("\n");
+                }
+              }
             }
 
             await this.journal.append({

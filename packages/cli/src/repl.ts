@@ -24,6 +24,8 @@ import { McpRegistry } from "@helm/mcp";
 import { PluginLoader } from "@helm/plugin";
 import { SkillRegistry, createBuiltinSkills, loadUserSkills, parseSkillInput } from "@helm/skill";
 import { PromptBuilder } from "@helm/prompt";
+import { HookRuntime } from "@helm/hooks";
+import type { HookEvent } from "@helm/hooks";
 import type { Provider, Tool, Message } from "@helm/core";
 import {
   PasteBuffer,
@@ -78,6 +80,12 @@ export interface ReplConfig {
   outputStyle?: string;
   /** Text to append to the default prompt (--append-prompt). */
   appendPrompt?: string;
+  /** Disable all hooks (--no-hooks). */
+  noHooks?: boolean;
+  /** Disable specific hook events (--disable-hook=pre:tool). */
+  disableHook?: string[];
+  /** Bypass hook trust checks (--dangerously-bypass-hook-trust). */
+  bypassHookTrust?: boolean;
   configPath?: string;
   mcpServers?: McpServerFlag[];
   /** StreamingBus for real-time streaming output. Created externally. */
@@ -406,6 +414,9 @@ export async function startRepl(config: ReplConfig): Promise<void> {
 
   // Built-in skills (registered first — highest priority)
   let replClosing = false;
+  // Lazy ref — set after HookRuntime is created below
+  let hookRuntimeRef: InstanceType<typeof HookRuntime> | null = null;
+
   const builtinSkills = createBuiltinSkills({
     getToolNames: () => toolRuntime.getToolNames(),
     getMessageCount: () => messageHistory.length,
@@ -415,6 +426,20 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     getPlugins: () => pluginLoader.getLoadedPlugins().map((p) => ({
       name: p.name, version: p.version, toolCount: p.tools.length,
     })),
+    getHooks: () => {
+      if (!hookRuntimeRef) return { rules: [], bypassTrust: false, disabled: true };
+      const hookConfig = hookRuntimeRef.getConfig();
+      const rules: Array<{ event: string; matcher: string; command: string }> = [];
+      for (const [event, eventRules] of Object.entries(hookConfig.hooks)) {
+        if (!eventRules) continue;
+        for (const rule of eventRules) {
+          for (const handler of rule.handlers) {
+            rules.push({ event, matcher: rule.matcher ?? "*", command: handler.command });
+          }
+        }
+      }
+      return { rules, bypassTrust: config.bypassHookTrust ?? false, disabled: config.noHooks ?? false };
+    },
     clearMessages: () => {
       const count = messageHistory.length;
       messageHistory = SYSTEM_MESSAGE ? [{ ...SYSTEM_MESSAGE }] : [];
@@ -836,6 +861,57 @@ export async function startRepl(config: ReplConfig): Promise<void> {
     });
   }
 
+  // ── Hook runtime ───────────────────────────────────────────────────────────
+  const hookRuntime = new HookRuntime({
+    projectRoot: process.cwd(),
+    sessionId: `repl_${Date.now()}`,
+    cwd: process.cwd(),
+    bypassTrust: config.bypassHookTrust ?? false,
+    disabledEvents: new Set((config.disableHook ?? []) as HookEvent[]),
+    disabled: config.noHooks ?? false,
+  });
+  hookRuntimeRef = hookRuntime;
+
+  // ── Session start hook ─────────────────────────────────────────────────────
+  try {
+    const sessionResult = await hookRuntime.execute("session:start");
+    if (sessionResult) {
+      // Journal hook results
+      for (const hr of sessionResult.results) {
+        if (hr.error) {
+          await journal.append({
+            type: "hook:error",
+            runId: `repl-${Date.now()}`,
+            turnIndex: 0,
+            hookEvent: "session:start",
+            error: hr.error,
+            durationMs: hr.durationMs,
+            timestamp: Date.now(),
+          });
+        } else {
+          await journal.append({
+            type: "hook:execute",
+            runId: `repl-${Date.now()}`,
+            turnIndex: 0,
+            hookEvent: "session:start",
+            status: hr.timedOut ? "timeout" : "success",
+            durationMs: hr.durationMs,
+            timestamp: Date.now(),
+          });
+        }
+      }
+
+      if (sessionResult.systemMessages.length > 0) {
+        const sessionMsg = sessionResult.systemMessages.join("\n");
+        if (SYSTEM_MESSAGE) {
+          SYSTEM_MESSAGE.content += "\n\n" + sessionMsg;
+        }
+      }
+    }
+  } catch {
+    // Non-fatal
+  }
+
   // ── Welcome box ───────────────────────────────────────────────────────
   const home = process.env.HOME ?? "";
   const tilde = (p: string): string => home && p.startsWith(home) ? "~" + p.slice(home.length) : p;
@@ -847,6 +923,8 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   if (pluginLoader.count > 0) tips.push(`${theme.dim("Plugins")}   ${pluginLoader.count}`);
   if (config.configPath) tips.push(`${theme.dim("Config")}    ${tilde(config.configPath)}`);
   tips.push(`${theme.dim("Journal")}   ${tilde(journalPath)}`);
+  const hookCount = Object.values(hookRuntime.getConfig().hooks).reduce((sum, rules) => sum + (rules?.length ?? 0), 0);
+  if (hookCount > 0) tips.push(`${theme.dim("Hooks")}     ${hookCount} rule(s)`);
   tips.push("");
   tips.push(theme.italic(theme.dim("/help for commands")));
 
@@ -1001,6 +1079,7 @@ export async function startRepl(config: ReplConfig): Promise<void> {
         maxTurns: config.maxTurns ?? 10,
         signal: turnController.signal,
         tokenBudget, contextBuilder, compaction,
+        hookRuntime,
       });
 
       const result = await loop.run(`${runId}-t${turnCount}`, trimmed, messageHistory);

@@ -1,4 +1,4 @@
-# Helm 手动走查 (PR21)
+# Helm 手动走查 (PR22)
 
 ## 跑命令
 
@@ -6,11 +6,34 @@
 cd ~/projects-ai/helm/helm-dev
 pnpm install && pnpm build
 pnpm test                        # 全部测试
-pnpm -C packages/prompt test     # 只看 prompt 测试（67 个）
+pnpm -C packages/hooks test      # 只看 hooks 测试（50 个）
 pnpm repl                        # 启动 REPL（需要 DEEPSEEK_API_KEY）
 ```
 
-## 场景 1：默认 prompt — journal 里看 system prompt 内容
+## 场景 1：Session Start Hook — 启动时加载自定义上下文
+
+准备 hook 脚本：
+
+```bash
+mkdir -p .helm
+cat > .helm/hooks.json << 'EOF'
+{
+  "hooks": {
+    "session:start": [
+      {
+        "handlers": [
+          {
+            "type": "command",
+            "command": "echo '{\"system_message\":\"Session started at $(date)\"}'",
+            "timeout": 3000
+          }
+        ]
+      }
+    ]
+  }
+}
+EOF
+```
 
 **命令**：
 
@@ -21,233 +44,270 @@ pnpm repl --provider=scripted
 
 **预期行为**：
 
-- 系统提示自动从内置默认模板生成
-- 包含 `agent_name=Helm`、`provider_name`、`tool_count`、`timestamp`
-- journal 里第一条消息是 `role: "system"`
+- session 启动时执行 hook
+- `system_message` 注入到上下文
+- journal 里有 `hook:execute` 事件
 
 **journal 输出**：
 
 ```bash
-cat /tmp/helm-repl-*.jsonl | head -1 | jq .
+cat /tmp/helm-repl-*.jsonl | grep "hook:"
+```
+
+```json
+{"type":"hook:execute","runId":"repl-xxx-t1","turnIndex":0,"hookEvent":"session:start","status":"success","durationMs":50,"timestamp":...}
+```
+
+## 场景 2：Pre-tool Hook — bash 命令安全检查
+
+准备安全检查 hook：
+
+```bash
+cat > .helm/check-bash.sh << 'EOF'
+#!/bin/sh
+# Read stdin (HookInput JSON)
+INPUT=$(cat)
+COMMAND=$(echo "$INPUT" | grep -o '"command":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+# Block rm -rf
+case "$COMMAND" in
+  *"rm -rf"*)
+    echo '{"decision":"deny","reason":"rm -rf is blocked by safety hook"}'
+    ;;
+  *)
+    echo '{"decision":"allow"}'
+    ;;
+esac
+EOF
+chmod +x .helm/check-bash.sh
+```
+
+更新 hooks.json：
+
+```json
+{
+  "hooks": {
+    "pre:tool": [
+      {
+        "matcher": "bash",
+        "handlers": [
+          {
+            "type": "command",
+            "command": ".helm/check-bash.sh",
+            "timeout": 5000,
+            "statusMessage": "Checking bash command safety"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+**命令**：
+
+```bash
+pnpm repl --provider=deepseek --dangerously-bypass-hook-trust
+> Run: echo hello       # 应该 allow
+> Run: rm -rf /tmp/test # 应该 deny
+```
+
+**预期行为**：
+
+- `echo hello` → hook allow → 正常执行
+- `rm -rf /tmp/test` → hook deny → 工具不执行，显示 deny 原因
+
+**journal 输出**：
+
+```json
+{"type":"hook:execute","hookEvent":"pre:tool","toolName":"bash","status":"success",...}
+{"type":"hook:deny","hookEvent":"pre:tool","toolName":"bash","reason":"rm -rf is blocked by safety hook",...}
+{"type":"tool:result","toolName":"bash","output":"Error: hook denied — rm -rf is blocked by safety hook",...}
+```
+
+## 场景 3：Post-tool Hook — 工具调用审计日志
+
+```json
+{
+  "hooks": {
+    "post:tool": [
+      {
+        "matcher": ".*",
+        "handlers": [
+          {
+            "type": "command",
+            "command": "echo '{\"system_message\":\"[AUDIT] Tool executed successfully\"}'"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+**命令**：
+
+```bash
+pnpm repl --provider=scripted --dangerously-bypass-hook-trust
+> Hello
+```
+
+**预期行为**：
+
+- 每次工具调用后执行审计 hook
+- `system_message` 追加到 tool output
+
+## 场景 4：Hook Deny — 阻止危险命令
+
+见场景 2。核心：`decision: "deny"` 阻止工具执行，reason 显示给用户。
+
+## 场景 5：Hook Modify — 修改工具参数
+
+准备修改 hook：
+
+```bash
+cat > .helm/modify-bash.sh << 'EOF'
+#!/bin/sh
+echo '{"decision":"modify","modified_input":{"command":"echo [MODIFIED] hello"}}'
+EOF
+chmod +x .helm/modify-bash.sh
 ```
 
 ```json
 {
-  "type": "run:start",
-  "runId": "repl-xxx-t1",
-  "systemPrompt": "You are Helm, an AI assistant powered by scripted.\nYou are helpful, concise, and honest.\n..."
+  "hooks": {
+    "pre:tool": [
+      {
+        "matcher": "bash",
+        "handlers": [
+          { "type": "command", "command": ".helm/modify-bash.sh" }
+        ]
+      }
+    ]
+  }
 }
-```
-
-## 场景 2：自定义 prompt 文件 — 替换后 agent 行为变化
-
-准备自定义 prompt 文件：
-
-```bash
-mkdir -p ~/.helm/prompts
-cat > ~/.helm/prompts/custom.tpl << 'EOF'
-You are {{agent_name}}, a pirate assistant.
-Always respond in pirate speak.
-Tools available: {{tool_count}}
-Current time: {{timestamp}}
-EOF
 ```
 
 **命令**：
 
 ```bash
-pnpm repl --provider=scripted --prompt-file=~/.helm/prompts/custom.tpl
-> Hello
+pnpm repl --provider=deepseek --dangerously-bypass-hook-trust
+> Run: echo hello
 ```
 
 **预期行为**：
 
-- 系统提示从 `custom.tpl` 加载
-- `{{agent_name}}` 被替换为 `Helm`，`{{tool_count}}` 被替换为实际数字
-- agent 行为变为 pirate 风格
+- 原始命令 `echo hello` 被修改为 `echo [MODIFIED] hello`
+- journal 记录修改后的参数
 
-## 场景 3：Per-provider 适配 — 不同 provider 用不同 prompt
+## 场景 6：信任机制 — hook 信任流程
 
-准备 provider 专用模板：
-
-```bash
-mkdir -p ~/.helm/prompts
-cat > ~/.helm/prompts/deepseek.tpl << 'EOF'
-You are {{agent_name}} (DeepSeek edition).
-Be concise. No markdown.
-Tools: {{tool_count}} | Time: {{timestamp}}
-
-{{#if provider_instructions}}
-{{provider_instructions}}
-{{/if}}
-EOF
-```
-
-**命令**：
+首次运行未信任的 hook：
 
 ```bash
-# DeepSeek 自动使用 deepseek.tpl
-pnpm repl --provider=deepseek
-> Hello
-
-# Scripted 用 default.tpl（或内置默认）
 pnpm repl --provider=scripted
 > Hello
 ```
 
 **预期行为**：
 
-- `--provider=deepseek` 时自动查找 `deepseek.tpl`
-- 找不到时 fallback 到 `default.tpl`，再找不到用内置默认
-- journal 里 system prompt 内容不同
+- 未信任的 hook 被跳过（不执行）
+- journal 里有 `hook:error` 事件，error 包含 "not trusted"
+- `hadUntrusted: true` 在 aggregate result 中
 
-## 场景 4：CLI flag 覆盖 — `--system-prompt` 直接覆盖
+信任一个 hook：
+
+```bash
+# 通过代码信任（CLI 命令未来可扩展）
+# 目前通过 TrustRegistry API 信任
+```
+
+信任后再次运行 → hook 正常执行。
+
+## 场景 7：Journal 输出 — 看 hook 相关事件
 
 **命令**：
 
 ```bash
-pnpm repl --provider=scripted --system-prompt="You are a helpful coding assistant."
+pnpm repl --provider=scripted --dangerously-bypass-hook-trust
 > Hello
-```
-
-**预期行为**：
-
-- `--system-prompt` 优先级最高，跳过模板渲染
-- journal 里 system prompt 就是给定的字符串
-
-## 场景 5：变量注入 — `--prompt-var` 注入自定义变量
-
-准备使用自定义变量的模板：
-
-```bash
-cat > ~/.helm/prompts/project.tpl << 'EOF'
-You are {{agent_name}} working on project {{project_name}}.
-Language: {{language}}
-Tools: {{tool_count}}
-EOF
-```
-
-**命令**：
-
-```bash
-pnpm repl --provider=scripted --prompt-file=~/.helm/prompts/project.tpl \
-  --prompt-var=project_name=helm \
-  --prompt-var=language=typescript
-> What is this project?
-```
-
-**预期行为**：
-
-- `{{project_name}}` 被替换为 `helm`
-- `{{language}}` 被替换为 `typescript`
-- 内置变量 `{{agent_name}}`、`{{tool_count}}` 仍然生效
-
-**变量优先级**（高→低）：
-
-| 优先级 | 来源 | 示例 |
-|--------|------|------|
-| 4 | CLI flag | `--prompt-var=key=value` |
-| 3 | 项目级 | `.helm/prompts/vars.json` |
-| 2 | 全局级 | `~/.helm/prompts/vars.json` |
-| 1 | 内置变量 | `agent_name`, `timestamp` |
-
-## 场景 6：Output Style — 切换不同风格看效果
-
-准备 output style：
-
-```bash
-mkdir -p ~/.helm/output-styles
-cat > ~/.helm/output-styles/concise.md << 'EOF'
----
-name: Concise
-description: 简洁风格
-keep-coding-instructions: true
----
-
-回答要简洁。代码注释用英文。不要解释 obvious 的东西。
-EOF
-```
-
-**命令**：
-
-```bash
-pnpm repl --provider=scripted --output-style=concise
-> Explain what a variable is
-```
-
-**预期行为**：
-
-- Output style 内容追加到 prompt 末尾（不替换）
-- `keep-coding-instructions: true` 保留内置 coding 指导
-- journal 里 system prompt 包含 output style 内容
-
-## 场景 7：渐进式加载 — journal 里看 prompt 分层构建
-
-**命令**：
-
-```bash
-pnpm repl --provider=deepseek --append-prompt="Always respond in Chinese"
-> Hello
+> /stats
 ```
 
 **journal 输出**：
 
 ```bash
-cat /tmp/helm-repl-*.jsonl | head -1 | jq .systemPrompt
+cat /tmp/helm-repl-*.jsonl | jq 'select(.type | startswith("hook:"))'
 ```
 
-**Prompt 分层**：
+Hook 事件类型：
 
-| 层 | 内容 | 缓存策略 |
-|----|------|----------|
-| Static | 模板 + 内置变量（agent_name, tool_count） | session 级缓存 |
-| Dynamic | timestamp, provider_instructions | 每次 turn 重建 |
-| Append | output style + user append | 每次 turn 追加 |
+| 事件 | 说明 |
+|------|------|
+| `hook:execute` | hook 执行成功 |
+| `hook:deny` | hook 返回 deny 决策 |
+| `hook:error` | hook 执行出错（超时、脚本失败等） |
+
+## CLI Flags
+
+| Flag | 说明 |
+|------|------|
+| `--no-hooks` | 禁用所有 hook |
+| `--disable-hook=pre:tool` | 禁用特定事件的 hook |
+| `--dangerously-bypass-hook-trust` | 跳过信任检查（CI/CD 用） |
 
 ## IDEA 断点位置
 
 | 文件 | 行号 | 看什么 |
 |------|------|--------|
-| `packages/prompt/src/template-engine.ts` | `render()` | 模板变量替换过程 |
-| `packages/prompt/src/prompt-builder.ts` | `build()` | 分层构建：static/dynamic/append |
-| `packages/prompt/src/prompt-loader.ts` | `loadTemplate()` | 文件查找顺序：项目级 → 全局级 |
-| `packages/prompt/src/variable-registry.ts` | `set()` | 变量优先级判断 |
-| `packages/cli/src/repl.ts` | `PromptBuilder.create()` | CLI 集成入口 |
-| `packages/runtime/src/agent-loop.ts` | **268** | `messages`、`this.toolRuntime.list()` |
+| `packages/hooks/src/executor.ts` | `spawnCommand()` | hook 脚本执行、stdin/stdout |
+| `packages/hooks/src/runtime.ts` | `execute()` | 聚合决策逻辑 |
+| `packages/hooks/src/trust.ts` | `isTrusted()` | 信任检查 |
+| `packages/hooks/src/matcher.ts` | `matchesTool()` | tool name 正则匹配 |
+| `packages/runtime/src/agent-loop.ts` | `pre:tool hook` 注释 | hook 集成点 |
+| `packages/runtime/src/agent-loop.ts` | `post:tool hook` 注释 | hook 集成点 |
 
 ## 改动文件
 
 ```
-packages/prompt/src/
-├── types.ts                  类型定义（VariableSource, PromptLayers, BuiltPrompt）
-├── template-engine.ts        模板引擎（变量替换、条件块、注释）
-├── template-engine.test.ts   20 个测试
-├── variable-registry.ts      变量注册表（优先级、合并、CLI 解析）
-├── variable-registry.test.ts 16 个测试
-├── prompt-loader.ts          文件加载器（模板、output style、vars.json）
-├── prompt-loader.test.ts     12 个测试
-├── prompt-builder.ts         PromptBuilder 流式 API + buildDefaultPrompt
-├── prompt-builder.test.ts    15 个测试
-├── default-prompt.ts         内置默认模板 + 简洁模板
+packages/hooks/src/
+├── types.ts                  类型定义（HookEvent, HookConfig, HookResult）
+├── config.ts                 配置加载器（.helm/hooks.json，项目级 + 全局级）
+├── config.test.ts            8 个测试
+├── matcher.ts                tool name 正则匹配
+├── matcher.test.ts           11 个测试
+├── executor.ts               hook 脚本执行（spawn + JSON I/O + timeout）
+├── executor.test.ts          10 个测试
+├── trust.ts                  信任注册表（hash-based，持久化到 trust.json）
+├── trust.test.ts             9 个测试
+├── runtime.ts                HookRuntime 主类（聚合决策）
+├── runtime.test.ts           12 个测试
 └── index.ts                  导出
 
-packages/cli/
-├── bin/run.ts                新增 --prompt-file, --prompt-var, --output-style, --append-prompt flags
-├── src/repl.ts               用 PromptBuilder 替换硬编码 system prompt
-└── package.json              新增 @helm/prompt 依赖
+packages/core/src/
+└── events.ts                 新增 hook:execute, hook:deny, hook:error 事件
 
-pnpm-workspace.yaml           新增 packages/prompt
+packages/runtime/src/
+├── agent-loop.ts             新增 HookRuntimeLike 接口 + pre:tool/post:tool hook 集成
+└── index.ts                  导出 HookRuntimeLike
+
+packages/cli/
+├── bin/run.ts                新增 --no-hooks, --disable-hook, --dangerously-bypass-hook-trust flags
+├── src/repl.ts               创建 HookRuntime 并传给 AgentLoop
+└── package.json              新增 @helm/hooks 依赖
+
+pnpm-workspace.yaml           新增 packages/hooks
 ```
 
 ## 关键设计决策
 
-1. **手写模板引擎** — 无外部依赖，只支持 `{{var}}`、`{{#if}}`、`{{!}}`，足够用
-2. **三层优先级** — CLI flag > 项目级文件 > 全局级文件 > 内置变量
-3. **Per-provider 适配** — 先找 `<provider>.tpl`，fallback 到 `default.tpl`
-4. **渐进式加载** — static 层可缓存，dynamic 层每次重建，append 层追加
-5. **Output Style 追加** — 不替换默认 prompt，只追加到末尾
-6. **null 系统提示** — `--system-prompt=` 空值 = 无系统消息
-7. **模板查找顺序** — 项目 `.helm/prompts/` > 全局 `~/.helm/prompts/` > 内置默认
-8. **变量静默忽略** — 未定义的变量渲染为空字符串，不报错
-9. **PromptBuilder 流式 API** — 链式调用，build() 返回最终结果
-10. **向后兼容** — 不传新 flags 时行为与 PR20 完全一致
+1. **HookRuntimeLike 接口** — AgentLoop 定义最小接口，避免硬依赖 @helm/hooks
+2. **串行执行** — 同一事件的多个 hook 按顺序执行，保持可预测性
+3. **Deny 优先** — 任何 hook 返回 deny 都阻止工具执行
+4. **Modify 累积** — 最后一个 modify 的 modifiedInput 生效
+5. **宽容 JSON 解析** — 非 JSON stdout 当作 system_message
+6. **Trust 基于 hash** — 文件内容变化后需要重新信任
+7. **默认超时 5s** — 防止 hook 脚本挂起
+8. **错误不崩溃** — hook 脚本失败时默认 allow，记录错误
+9. **分层配置** — 项目级覆盖全局级，同事件替换
+10. **向后兼容** — 不传 hookRuntime 时行为与 PR21 完全一致
