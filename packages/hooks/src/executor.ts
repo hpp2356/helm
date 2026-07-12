@@ -91,15 +91,34 @@ function spawnCommand(
       stderr += data.toString();
     });
 
-    // Write input JSON to stdin
+    // Write input JSON to stdin (handle EPIPE if process exits early)
     const inputJson = JSON.stringify(input);
-    proc.stdin.write(inputJson);
-    proc.stdin.end();
+    proc.stdin.on("error", () => {
+      // Ignore stdin errors (EPIPE when process exits before we write)
+    });
+    try {
+      proc.stdin.write(inputJson);
+      proc.stdin.end();
+    } catch {
+      // Process may have already exited
+    }
 
-    // Timeout
+    // Timeout — use SIGTERM then SIGKILL fallback
     const timer = setTimeout(() => {
       timedOut = true;
-      proc.kill("SIGTERM");
+      try {
+        proc.kill("SIGTERM");
+      } catch {
+        // Process may already be dead
+      }
+      // Force kill after 1s if SIGTERM didn't work
+      setTimeout(() => {
+        try {
+          proc.kill("SIGKILL");
+        } catch {
+          // Already dead
+        }
+      }, 1000);
     }, timeout);
 
     proc.on("close", (code) => {

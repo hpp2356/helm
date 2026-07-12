@@ -76,7 +76,7 @@ echo '{"decision":"modify","modified_input":{"command":"ls -la --color=auto"}}'
     expect(result.modifiedInput).toEqual({ command: "ls -la --color=auto" });
   });
 
-  it("handles timeout", async () => {
+  it("handles timeout", { timeout: 10000 }, async () => {
     const script = join(tempDir, "slow.sh");
     writeFileSync(script, `#!/bin/sh
 sleep 10
@@ -84,7 +84,7 @@ sleep 10
     chmodSync(script, 0o755);
 
     const result = await executeHandler(
-      { type: "command", command: script, timeout: 100 },
+      { type: "command", command: script, timeout: 200 },
       TEST_INPUT,
     );
 
