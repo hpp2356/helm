@@ -26,6 +26,7 @@ import { SkillRegistry, createBuiltinSkills, loadUserSkills, parseSkillInput } f
 import { PromptBuilder } from "@helm/prompt";
 import { HookRuntime } from "@helm/hooks";
 import type { HookEvent } from "@helm/hooks";
+import { TelemetryManager, loadTelemetryConfig } from "@helm/telemetry";
 import type { Provider, Tool, Message } from "@helm/core";
 import {
   PasteBuffer,
@@ -86,6 +87,10 @@ export interface ReplConfig {
   disableHook?: string[];
   /** Bypass hook trust checks (--dangerously-bypass-hook-trust). */
   bypassHookTrust?: boolean;
+  /** Disable telemetry (--no-telemetry). */
+  noTelemetry?: boolean;
+  /** Verbose telemetry logging (--telemetry-verbose). */
+  telemetryVerbose?: boolean;
   configPath?: string;
   mcpServers?: McpServerFlag[];
   /** StreamingBus for real-time streaming output. Created externally. */
@@ -872,6 +877,14 @@ export async function startRepl(config: ReplConfig): Promise<void> {
   });
   hookRuntimeRef = hookRuntime;
 
+  // ── Telemetry ──────────────────────────────────────────────────────────────
+  const telemetryConfig = loadTelemetryConfig();
+  if (config.noTelemetry) telemetryConfig.enabled = false;
+  if (config.telemetryVerbose) telemetryConfig.verbose = true;
+  const telemetry = new TelemetryManager(telemetryConfig);
+  const sessionId = `repl-${Date.now()}`;
+  telemetry.startSession(sessionId, config.providerName, config.providerName);
+
   // ── Session start hook ─────────────────────────────────────────────────────
   try {
     const sessionResult = await hookRuntime.execute("session:start");
@@ -1165,6 +1178,8 @@ export async function startRepl(config: ReplConfig): Promise<void> {
       writeFileSync(`${process.env.HOME ?? "/tmp"}/.helm_history`, historyLines.slice(-500).join("\n"), "utf-8");
     } catch { /* non-fatal */ }
     pluginLoader.destroyAll().catch(() => {});
+    telemetry.endSession();
+    telemetry.shutdown();
     journal.close().catch(() => {});
     console.log(theme.dim(`\nJournal → ${journalPath}`));
   });

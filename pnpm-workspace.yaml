@@ -10,6 +10,7 @@ packages:
   - 'packages/skill'
   - 'packages/prompt'
   - 'packages/hooks'
+  - 'packages/telemetry'
 allowBuilds:
   esbuild: true
 minimumReleaseAgeExclude:

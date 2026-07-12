@@ -1,313 +1,212 @@
-# Helm 手动走查 (PR22)
+# Helm 手动走查 (PR23)
 
 ## 跑命令
 
 ```bash
 cd ~/projects-ai/helm/helm-dev
 pnpm install && pnpm build
-pnpm test                        # 全部测试
-pnpm -C packages/hooks test      # 只看 hooks 测试（50 个）
-pnpm repl                        # 启动 REPL（需要 DEEPSEEK_API_KEY）
+pnpm test                           # 全部测试
+pnpm -C packages/telemetry test     # 只看 telemetry 测试（78 个）
 ```
 
-## 场景 1：Session Start Hook — 启动时加载自定义上下文
-
-准备 hook 脚本：
-
-```bash
-mkdir -p .helm
-cat > .helm/hooks.json << 'EOF'
-{
-  "hooks": {
-    "session:start": [
-      {
-        "handlers": [
-          {
-            "type": "command",
-            "command": "echo '{\"system_message\":\"Session started at $(date)\"}'",
-            "timeout": 3000
-          }
-        ]
-      }
-    ]
-  }
-}
-EOF
-```
+## 场景 1：Console 导出 — 看 stderr 输出的 metrics
 
 **命令**：
 
 ```bash
-pnpm repl --provider=scripted
+HELM_TELEMETRY_ENABLED=1 HELM_METRICS_EXPORTER=console HELM_LOGS_EXPORTER=console pnpm repl --provider=scripted
 > Hello
+> /exit
 ```
 
 **预期行为**：
 
-- session 启动时执行 hook
-- `system_message` 注入到上下文
-- journal 里有 `hook:execute` 事件
+- stderr 输出 metrics 和 logs
+- 输出格式：`[telemetry] metric helm.session.count=1`
+- 输出格式：`[telemetry] info [session:start] — Session repl-xxx started`
 
-**journal 输出**：
+**stderr 输出示例**：
 
-```bash
-cat /tmp/helm-repl-*.jsonl | grep "hook:"
+```
+[telemetry] metric helm.session.count=1 {"model":"scripted","provider":"scripted"}
+[telemetry] info [session:start] — Session repl-1234 started
+[telemetry] info [session:end] — Session repl-1234 ended
+[telemetry] metric helm.session.duration=5234
 ```
 
-```json
-{"type":"hook:execute","runId":"repl-xxx-t1","turnIndex":0,"hookEvent":"session:start","status":"success","durationMs":50,"timestamp":...}
-```
-
-## 场景 2：Pre-tool Hook — bash 命令安全检查
-
-准备安全检查 hook：
-
-```bash
-cat > .helm/check-bash.sh << 'EOF'
-#!/bin/sh
-# Read stdin (HookInput JSON)
-INPUT=$(cat)
-COMMAND=$(echo "$INPUT" | grep -o '"command":"[^"]*"' | head -1 | cut -d'"' -f4)
-
-# Block rm -rf
-case "$COMMAND" in
-  *"rm -rf"*)
-    echo '{"decision":"deny","reason":"rm -rf is blocked by safety hook"}'
-    ;;
-  *)
-    echo '{"decision":"allow"}'
-    ;;
-esac
-EOF
-chmod +x .helm/check-bash.sh
-```
-
-更新 hooks.json：
-
-```json
-{
-  "hooks": {
-    "pre:tool": [
-      {
-        "matcher": "bash",
-        "handlers": [
-          {
-            "type": "command",
-            "command": ".helm/check-bash.sh",
-            "timeout": 5000,
-            "statusMessage": "Checking bash command safety"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
+## 场景 2：File 导出 — 检查 ~/.helm/telemetry/ 文件
 
 **命令**：
 
 ```bash
-pnpm repl --provider=deepseek --dangerously-bypass-hook-trust
-> Run: echo hello       # 应该 allow
-> Run: rm -rf /tmp/test # 应该 deny
-```
-
-**预期行为**：
-
-- `echo hello` → hook allow → 正常执行
-- `rm -rf /tmp/test` → hook deny → 工具不执行，显示 deny 原因
-
-**journal 输出**：
-
-```json
-{"type":"hook:execute","hookEvent":"pre:tool","toolName":"bash","status":"success",...}
-{"type":"hook:deny","hookEvent":"pre:tool","toolName":"bash","reason":"rm -rf is blocked by safety hook",...}
-{"type":"tool:result","toolName":"bash","output":"Error: hook denied — rm -rf is blocked by safety hook",...}
-```
-
-## 场景 3：Post-tool Hook — 工具调用审计日志
-
-```json
-{
-  "hooks": {
-    "post:tool": [
-      {
-        "matcher": ".*",
-        "handlers": [
-          {
-            "type": "command",
-            "command": "echo '{\"system_message\":\"[AUDIT] Tool executed successfully\"}'"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-**命令**：
-
-```bash
-pnpm repl --provider=scripted --dangerously-bypass-hook-trust
+HELM_TELEMETRY_ENABLED=1 pnpm repl --provider=scripted
 > Hello
+> /exit
+ls -la ~/.helm/telemetry/
+cat ~/.helm/telemetry/metrics-*.jsonl
+cat ~/.helm/telemetry/logs-*.jsonl
+cat ~/.helm/telemetry/usage.jsonl
 ```
 
 **预期行为**：
 
-- 每次工具调用后执行审计 hook
-- `system_message` 追加到 tool output
+- `~/.helm/telemetry/` 目录自动创建
+- `metrics-YYYY-MM-DD.jsonl` 包含 metrics 数据
+- `logs-YYYY-MM-DD.jsonl` 包含 logs 数据
+- `usage.jsonl` 包含会话汇总
 
-## 场景 4：Hook Deny — 阻止危险命令
-
-见场景 2。核心：`decision: "deny"` 阻止工具执行，reason 显示给用户。
-
-## 场景 5：Hook Modify — 修改工具参数
-
-准备修改 hook：
-
-```bash
-cat > .helm/modify-bash.sh << 'EOF'
-#!/bin/sh
-echo '{"decision":"modify","modified_input":{"command":"echo [MODIFIED] hello"}}'
-EOF
-chmod +x .helm/modify-bash.sh
-```
+**usage.jsonl 示例**：
 
 ```json
-{
-  "hooks": {
-    "pre:tool": [
-      {
-        "matcher": "bash",
-        "handlers": [
-          { "type": "command", "command": ".helm/modify-bash.sh" }
-        ]
-      }
-    ]
-  }
-}
+{"session_id":"repl-1234","start_time":"2026-07-12T10:00:00Z","end_time":"2026-07-12T10:00:05Z","token_input":0,"token_output":0,"tool_calls":0,"tool_errors":0,"api_requests":0,"hook_executions":0}
 ```
+
+## 场景 3：Token 统计 — 看 token 使用量
 
 **命令**：
 
 ```bash
-pnpm repl --provider=deepseek --dangerously-bypass-hook-trust
-> Run: echo hello
+HELM_TELEMETRY_ENABLED=1 pnpm repl --provider=deepseek
+> Tell me a joke
+> /exit
+cat ~/.helm/telemetry/usage.jsonl | jq '.token_input, .token_output'
 ```
 
 **预期行为**：
 
-- 原始命令 `echo hello` 被修改为 `echo [MODIFIED] hello`
-- journal 记录修改后的参数
+- `token_input` 记录输入 token 数
+- `token_output` 记录输出 token 数
+- metrics 文件包含 `helm.api.token.input` 和 `helm.api.token.output`
 
-## 场景 6：信任机制 — hook 信任流程
-
-首次运行未信任的 hook：
-
-```bash
-pnpm repl --provider=scripted
-> Hello
-```
-
-**预期行为**：
-
-- 未信任的 hook 被跳过（不执行）
-- journal 里有 `hook:error` 事件，error 包含 "not trusted"
-- `hadUntrusted: true` 在 aggregate result 中
-
-信任一个 hook：
-
-```bash
-# 通过代码信任（CLI 命令未来可扩展）
-# 目前通过 TrustRegistry API 信任
-```
-
-信任后再次运行 → hook 正常执行。
-
-## 场景 7：Journal 输出 — 看 hook 相关事件
+## 场景 4：工具调用统计 — 看工具调用次数和延迟
 
 **命令**：
 
 ```bash
-pnpm repl --provider=scripted --dangerously-bypass-hook-trust
-> Hello
-> /stats
+HELM_TELEMETRY_ENABLED=1 pnpm repl --provider=deepseek
+> Read the file package.json
+> /exit
+cat ~/.helm/telemetry/usage.jsonl | jq '.tool_calls, .tool_errors'
+cat ~/.helm/telemetry/metrics-*.jsonl | grep "tool.call"
 ```
 
-**journal 输出**：
+**预期行为**：
+
+- `tool_calls` 记录工具调用次数
+- `tool_errors` 记录工具调用错误数
+- metrics 包含 `helm.tool.call.duration` 带延迟数据
+
+## 场景 5：会话汇总 — 看 usage.jsonl 内容
+
+**命令**：
 
 ```bash
-cat /tmp/helm-repl-*.jsonl | jq 'select(.type | startswith("hook:"))'
+HELM_TELEMETRY_ENABLED=1 pnpm repl --provider=deepseek
+> Hello
+> /exit
+cat ~/.helm/telemetry/usage.jsonl | jq .
 ```
 
-Hook 事件类型：
+**预期字段**：
 
-| 事件 | 说明 |
+| 字段 | 说明 |
 |------|------|
-| `hook:execute` | hook 执行成功 |
-| `hook:deny` | hook 返回 deny 决策 |
-| `hook:error` | hook 执行出错（超时、脚本失败等） |
+| `session_id` | 会话 ID |
+| `start_time` | 开始时间 |
+| `end_time` | 结束时间 |
+| `token_input` | 输入 token 总数 |
+| `token_output` | 输出 token 总数 |
+| `tool_calls` | 工具调用次数 |
+| `tool_errors` | 工具调用错误数 |
+| `api_requests` | API 请求次数 |
+| `hook_executions` | Hook 执行次数 |
+
+## 场景 6：隐私控制 — 验证 prompt 不被记录
+
+**命令**：
+
+```bash
+# 默认不记录 prompt
+HELM_TELEMETRY_ENABLED=1 HELM_LOGS_EXPORTER=file pnpm repl --provider=deepseek
+> Tell me a secret: my password is 12345
+> /exit
+cat ~/.helm/telemetry/logs-*.jsonl | grep -i "password"
+```
+
+**预期行为**：
+
+- 默认 `HELM_LOG_USER_PROMPTS=0` — prompt 内容不出现在 logs
+- 默认 `HELM_LOG_TOOL_CONTENT=0` — 工具输出内容不出现在 logs
+- grep 无结果
+
+**启用 prompt 记录**：
+
+```bash
+HELM_TELEMETRY_ENABLED=1 HELM_LOG_USER_PROMPTS=1 pnpm repl
+# 现在 prompt 内容会出现在 logs
+```
 
 ## CLI Flags
 
-| Flag | 说明 |
-|------|------|
-| `--no-hooks` | 禁用所有 hook |
-| `--disable-hook=pre:tool` | 禁用特定事件的 hook |
-| `--dangerously-bypass-hook-trust` | 跳过信任检查（CI/CD 用） |
+| Flag | 环境变量 | 说明 |
+|------|----------|------|
+| `--no-telemetry` | `HELM_TELEMETRY_ENABLED=0` | 禁用 telemetry |
+| `--telemetry-verbose` | `HELM_TELEMETRY_VERBOSE=1` | 详细日志（debug 级别） |
+| — | `HELM_METRICS_EXPORTER=console` | Metrics 导出器 |
+| — | `HELM_LOGS_EXPORTER=file` | Logs 导出器 |
+| — | `HELM_TRACES_EXPORTER=none` | Traces 导出器 |
+| — | `HELM_LOG_USER_PROMPTS=1` | 记录 prompt 内容 |
+| — | `HELM_LOG_TOOL_CONTENT=1` | 记录工具输出内容 |
 
 ## IDEA 断点位置
 
 | 文件 | 行号 | 看什么 |
 |------|------|--------|
-| `packages/hooks/src/executor.ts` | `spawnCommand()` | hook 脚本执行、stdin/stdout |
-| `packages/hooks/src/runtime.ts` | `execute()` | 聚合决策逻辑 |
-| `packages/hooks/src/trust.ts` | `isTrusted()` | 信任检查 |
-| `packages/hooks/src/matcher.ts` | `matchesTool()` | tool name 正则匹配 |
-| `packages/runtime/src/agent-loop.ts` | `pre:tool hook` 注释 | hook 集成点 |
-| `packages/runtime/src/agent-loop.ts` | `post:tool hook` 注释 | hook 集成点 |
+| `packages/telemetry/src/telemetry.ts` | `startSession()` | 会话开始 metrics |
+| `packages/telemetry/src/telemetry.ts` | `recordApiRequest()` | API 请求 metrics |
+| `packages/telemetry/src/telemetry.ts` | `recordToolCall()` | 工具调用 metrics |
+| `packages/telemetry/src/telemetry.ts` | `flush()` | 导出触发 |
+| `packages/telemetry/src/telemetry.ts` | `exportUsage()` | usage.jsonl 写入 |
+| `packages/telemetry/src/exporters/file.ts` | `exportMetrics()` | 文件写入 |
 
 ## 改动文件
 
 ```
-packages/hooks/src/
-├── types.ts                  类型定义（HookEvent, HookConfig, HookResult）
-├── config.ts                 配置加载器（.helm/hooks.json，项目级 + 全局级）
-├── config.test.ts            8 个测试
-├── matcher.ts                tool name 正则匹配
-├── matcher.test.ts           11 个测试
-├── executor.ts               hook 脚本执行（spawn + JSON I/O + timeout）
-├── executor.test.ts          10 个测试
-├── trust.ts                  信任注册表（hash-based，持久化到 trust.json）
-├── trust.test.ts             9 个测试
-├── runtime.ts                HookRuntime 主类（聚合决策）
-├── runtime.test.ts           12 个测试
-└── index.ts                  导出
-
-packages/core/src/
-└── events.ts                 新增 hook:execute, hook:deny, hook:error 事件
-
-packages/runtime/src/
-├── agent-loop.ts             新增 HookRuntimeLike 接口 + pre:tool/post:tool hook 集成
-└── index.ts                  导出 HookRuntimeLike
+packages/telemetry/src/
+├── types.ts                    类型定义（MetricEntry, LogEntry, SpanEntry, UsageEntry）
+├── config.ts                   环境变量配置加载
+├── config.test.ts              5 个测试
+├── metrics.ts                  MetricsCollector（counter, histogram）
+├── metrics.test.ts             5 个测试
+├── logs.ts                     LogsCollector（debug/info/warn/error）
+├── logs.test.ts                5 个测试
+├── traces.ts                   TracesCollector（span 生命周期）
+├── traces.test.ts              5 个测试
+├── telemetry.ts                TelemetryManager 主类
+├── telemetry.test.ts           8 个测试
+├── exporters/
+│   ├── console.ts              ConsoleExporter（stderr）
+│   ├── console.test.ts         4 个测试
+│   ├── file.ts                 FileExporter（JSONL 文件）
+│   ├── file.test.ts            5 个测试
+│   └── noop.ts                 NoopExporter
+└── index.ts                    导出
 
 packages/cli/
-├── bin/run.ts                新增 --no-hooks, --disable-hook, --dangerously-bypass-hook-trust flags
-├── src/repl.ts               创建 HookRuntime 并传给 AgentLoop
-└── package.json              新增 @helm/hooks 依赖
+├── bin/run.ts                  新增 --no-telemetry, --telemetry-verbose flags
+├── src/repl.ts                 TelemetryManager 集成
+└── package.json                新增 @helm/telemetry 依赖
 
-pnpm-workspace.yaml           新增 packages/hooks
+pnpm-workspace.yaml             新增 packages/telemetry
 ```
 
 ## 关键设计决策
 
-1. **HookRuntimeLike 接口** — AgentLoop 定义最小接口，避免硬依赖 @helm/hooks
-2. **串行执行** — 同一事件的多个 hook 按顺序执行，保持可预测性
-3. **Deny 优先** — 任何 hook 返回 deny 都阻止工具执行
-4. **Modify 累积** — 最后一个 modify 的 modifiedInput 生效
-5. **宽容 JSON 解析** — 非 JSON stdout 当作 system_message
-6. **Trust 基于 hash** — 文件内容变化后需要重新信任
-7. **默认超时 5s** — 防止 hook 脚本挂起
-8. **错误不崩溃** — hook 脚本失败时默认 allow，记录错误
-9. **分层配置** — 项目级覆盖全局级，同事件替换
-10. **向后兼容** — 不传 hookRuntime 时行为与 PR21 完全一致
+1. **手写轻量实现** — 不引入 OTel SDK，自己实现 metrics/logs/traces 收集
+2. **环境变量配置** — `HELM_*` 环境变量控制行为，兼容 12-factor app
+3. **分层导出器** — console/file/noop 三种导出器，可独立配置
+4. **隐私优先** — 默认不记录 prompt 和工具输出
+5. **非阻塞** — telemetry 操作不阻塞 AgentLoop 执行
+6. **容错** — 导出失败不影响 Helm 运行
+7. **文件格式** — JSONL 按天分割，usage.jsonl 汇总会话数据
+8. **向后兼容** — 不传 telemetry flags 时行为与 PR22 完全一致

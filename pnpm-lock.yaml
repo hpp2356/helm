@@ -47,6 +47,9 @@ importers:
       '@helm/skill':
         specifier: workspace:*
         version: link:../skill
+      '@helm/telemetry':
+        specifier: workspace:*
+        version: link:../telemetry
     optionalDependencies:
       '@helm/provider-deepseek':
         specifier: workspace:*
@@ -115,6 +118,8 @@ importers:
       '@helm/core':
         specifier: workspace:*
         version: link:../core
+
+  packages/telemetry: {}
 
 packages:
 
