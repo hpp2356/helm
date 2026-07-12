@@ -71,17 +71,34 @@ function spawnCommand(
   command: string,
   input: HookInput,
   timeout: number,
-  signal?: AbortSignal,
+  externalSignal?: AbortSignal,
 ): Promise<SpawnResult> {
   return new Promise((resolve) => {
+    // Create internal controller for timeout; merge with external signal
+    const controller = new AbortController();
+    let timedOut = false;
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeout);
+
+    // Forward external signal
+    if (externalSignal) {
+      if (externalSignal.aborted) {
+        controller.abort();
+      } else {
+        externalSignal.addEventListener("abort", () => controller.abort(), { once: true });
+      }
+    }
+
     const proc = spawn("sh", ["-c", command], {
       stdio: ["pipe", "pipe", "pipe"],
-      signal,
+      signal: controller.signal,
     });
 
     let stdout = "";
     let stderr = "";
-    let timedOut = false;
 
     proc.stdout.on("data", (data: Buffer) => {
       stdout += data.toString();
@@ -92,34 +109,16 @@ function spawnCommand(
     });
 
     // Write input JSON to stdin (handle EPIPE if process exits early)
-    const inputJson = JSON.stringify(input);
     proc.stdin.on("error", () => {
       // Ignore stdin errors (EPIPE when process exits before we write)
     });
     try {
+      const inputJson = JSON.stringify(input);
       proc.stdin.write(inputJson);
       proc.stdin.end();
     } catch {
       // Process may have already exited
     }
-
-    // Timeout — use SIGTERM then SIGKILL fallback
-    const timer = setTimeout(() => {
-      timedOut = true;
-      try {
-        proc.kill("SIGTERM");
-      } catch {
-        // Process may already be dead
-      }
-      // Force kill after 1s if SIGTERM didn't work
-      setTimeout(() => {
-        try {
-          proc.kill("SIGKILL");
-        } catch {
-          // Already dead
-        }
-      }, 1000);
-    }, timeout);
 
     proc.on("close", (code) => {
       clearTimeout(timer);
@@ -134,7 +133,16 @@ function spawnCommand(
     proc.on("error", (err) => {
       clearTimeout(timer);
       if ((err as NodeJS.ErrnoException).code === "ERR_STREAM_PREMATURE_CLOSE") {
-        // Process was killed (likely by signal)
+        resolve({
+          exitCode: 1,
+          stdout: stdout.trim(),
+          stderr: stderr.trim(),
+          timedOut,
+        });
+        return;
+      }
+      // AbortError from signal — treat as timeout/kill
+      if (err.name === "AbortError") {
         resolve({
           exitCode: 1,
           stdout: stdout.trim(),
